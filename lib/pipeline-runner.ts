@@ -1,0 +1,1240 @@
+import fs from 'fs'
+import path from 'path'
+import zlib from 'zlib'
+import { pipeline } from 'stream'
+import { spawn, exec, ChildProcess } from 'child_process'
+import { Client } from 'ssh2'
+import { wrapSshCommand } from './shell-env'
+import {
+  Project,
+  Deployment,
+  DeployLogEntry,
+  DeploymentStatus,
+  TriggerType,
+  ServerNode,
+} from './types'
+import {
+  getProjectById,
+  updateProject,
+  createDeployment,
+  updateDeployment,
+  appendDeployLog,
+  getDeploymentById,
+  getServerById,
+  getServerByIp,
+  getSettings,
+} from './db'
+import { DockerDistributorFactory } from './docker-distributor'
+
+export type StreamEventType = 'log' | 'status' | 'end'
+
+export interface StreamEvent {
+  type: StreamEventType
+  deploymentId: string
+  payload: any
+}
+
+export function generateDockerVersionTag(commitHash?: string, date = new Date()): string {
+  const pad = (n: number) => n.toString().padStart(2, '0')
+  const YYYY = date.getFullYear()
+  const MM = pad(date.getMonth() + 1)
+  const DD = pad(date.getDate())
+  const HH = pad(date.getHours())
+  const mm = pad(date.getMinutes())
+  const ss = pad(date.getSeconds())
+  const timeStr = `${YYYY}${MM}${DD}${HH}${mm}${ss}`
+  const validHash =
+    commitHash && commitHash !== '获取中...' && commitHash !== '-'
+      ? commitHash.replace(/[^a-zA-Z0-9]/g, '').substring(0, 7)
+      : Math.random().toString(36).substring(2, 9)
+  return `${timeStr}-${validHash}`
+}
+
+type LogListener = (event: StreamEvent) => void
+
+class PipelineManager {
+  private listeners: Map<string, Set<LogListener>> = new Map()
+  private activeControllers: Map<string, AbortController> = new Map()
+
+  public subscribe(deploymentId: string, listener: LogListener): () => void {
+    if (!this.listeners.has(deploymentId)) {
+      this.listeners.set(deploymentId, new Set())
+    }
+    this.listeners.get(deploymentId)!.add(listener)
+
+    return () => {
+      const set = this.listeners.get(deploymentId)
+      if (set) {
+        set.delete(listener)
+        if (set.size === 0) {
+          this.listeners.delete(deploymentId)
+        }
+      }
+    }
+  }
+
+  private emit(deploymentId: string, event: StreamEvent) {
+    const set = this.listeners.get(deploymentId)
+    if (set) {
+      set.forEach((listener) => {
+        try {
+          listener(event)
+        } catch (e) {
+          console.error('Error dispatching stream event', e)
+        }
+      })
+    }
+  }
+
+  public cancel(deploymentId: string): boolean {
+    const controller = this.activeControllers.get(deploymentId)
+    if (controller) {
+      controller.abort()
+      this.activeControllers.delete(deploymentId)
+
+      const dep = getDeploymentById(deploymentId)
+      if (dep && dep.status === 'running') {
+        const cancelLog: DeployLogEntry = {
+          id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          text: `[!] 用户手动取消了部署任务`,
+          type: 'error',
+          timestamp: new Date().toLocaleTimeString(),
+        }
+        appendDeployLog(deploymentId, cancelLog)
+        this.emit(deploymentId, { type: 'log', deploymentId, payload: cancelLog })
+
+        updateDeployment(deploymentId, {
+          status: 'cancelled',
+          endTime: new Date().toISOString(),
+          currentStep: '已取消',
+        })
+        this.emit(deploymentId, {
+          type: 'status',
+          deploymentId,
+          payload: { status: 'cancelled', currentStep: '已取消' },
+        })
+        this.emit(deploymentId, { type: 'end', deploymentId, payload: { status: 'cancelled' } })
+      }
+      return true
+    }
+    return false
+  }
+
+  public async trigger(
+    projectId: string,
+    triggerType: TriggerType = 'manual',
+    customCommit?: { hash?: string; message?: string; versionTag?: string }
+  ): Promise<Deployment> {
+    const project = getProjectById(projectId)
+    if (!project) {
+      throw new Error(`Project ${projectId} not found`)
+    }
+
+    const isReal = project.runnerMode === 'real'
+    const commitHash =
+      customCommit?.hash || (isReal ? '获取中...' : Math.random().toString(16).substring(2, 9))
+    const commitMessage =
+      customCommit?.message ||
+      (isReal
+        ? (triggerType === 'rollback' ? `rollback: 回滚到版本 ${customCommit?.hash || ''}` : '等待代码拉取...')
+        : (triggerType === 'manual'
+          ? `manual: 触发构建部署分支 ${project.branch}`
+          : triggerType === 'rollback'
+            ? `rollback: 回滚到版本 ${commitHash}`
+            : `webhook: 自动触发分支 ${project.branch}`))
+
+    const deployment = createDeployment({
+      projectId: project.id,
+      projectName: project.name,
+      branch: project.branch,
+      commitHash,
+      commitMessage,
+      versionTag: customCommit?.versionTag,
+      triggerType,
+      currentStep: '准备初始化...',
+    })
+
+    // Start asynchronous pipeline execution
+    this.executePipeline(project, deployment).catch((err) => {
+      console.error('Pipeline execution error:', err)
+    })
+
+    return deployment
+  }
+
+  private async executePipeline(project: Project, deployment: Deployment): Promise<void> {
+    const deploymentId = deployment.id
+    const abortController = new AbortController()
+    this.activeControllers.set(deploymentId, abortController)
+
+    const startTime = Date.now()
+
+    const log = (
+      text: string,
+      type: 'info' | 'success' | 'error' | 'warning' = 'info',
+      step?: string
+    ) => {
+      const entry: DeployLogEntry = {
+        id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        text,
+        type,
+        step,
+        timestamp: new Date().toLocaleTimeString(),
+      }
+      appendDeployLog(deploymentId, entry)
+      this.emit(deploymentId, { type: 'log', deploymentId, payload: entry })
+    }
+
+    const setStatus = (status: DeploymentStatus, currentStep?: string) => {
+      updateDeployment(deploymentId, { status, currentStep })
+      this.emit(deploymentId, {
+        type: 'status',
+        deploymentId,
+        payload: { status, currentStep },
+      })
+    }
+
+    try {
+      if (project.runnerMode === 'real') {
+        await this.executeRealPipeline(
+          project,
+          deployment,
+          abortController,
+          log,
+          setStatus,
+          startTime
+        )
+      } else {
+        await this.executeSimulatedPipeline(
+          project,
+          deployment,
+          abortController,
+          log,
+          setStatus,
+          startTime
+        )
+      }
+    } catch (err: any) {
+      if (abortController.signal.aborted) {
+        return
+      }
+
+      const durationSeconds = Math.round((Date.now() - startTime) / 1000)
+      log(`[!] 流水线异常终止: ${err.message || '未知异常'}`, 'error')
+
+      updateDeployment(deploymentId, {
+        status: 'failed',
+        endTime: new Date().toISOString(),
+        durationSeconds,
+        currentStep: '部署异常',
+      })
+      updateProject(project.id, {
+        status: 'error',
+      })
+
+      this.emit(deploymentId, {
+        type: 'status',
+        deploymentId,
+        payload: { status: 'failed', currentStep: '部署异常' },
+      })
+      this.emit(deploymentId, {
+        type: 'end',
+        deploymentId,
+        payload: { status: 'failed' },
+      })
+    } finally {
+      this.activeControllers.delete(deploymentId)
+    }
+  }
+
+  /**
+   * 真实 Shell 与远程 SSH 执行引擎
+   */
+  private async executeRealPipeline(
+    project: Project,
+    deployment: Deployment,
+    abortController: AbortController,
+    log: (text: string, type?: 'info' | 'success' | 'error' | 'warning', step?: string) => void,
+    setStatus: (status: DeploymentStatus, currentStep?: string) => void,
+    startTime: number
+  ): Promise<void> {
+    const deploymentId = deployment.id
+    setStatus('running', '初始化环境')
+    updateProject(project.id, { status: 'deploying' })
+
+    const workspaceDir = path.join(process.cwd(), '.cicd_workspaces', project.id)
+    if (!fs.existsSync(workspaceDir)) {
+      fs.mkdirSync(workspaceDir, { recursive: true })
+    }
+
+    log(`[00:00] 启动【真实系统 Shell 模式】执行流水线...`, 'info', 'INIT')
+    log(`[00:00] 本地工作空间目录: ${workspaceDir}`, 'info', 'INIT')
+    log(`[00:00] 目标部署服务: ${project.serverName} (${project.serverIp}:${project.port})`, 'info', 'INIT')
+
+    // 查找目标服务器节点及其 SSH 凭据
+    let server: ServerNode | undefined
+    if (project.serverId) {
+      server = getServerById(project.serverId)
+    }
+    if (!server) {
+      server = getServerByIp(project.serverIp)
+    }
+
+    if (abortController.signal.aborted) return
+
+    // -------------------------------------------------------------
+    // 阶段 1: Git 代码真实检出
+    // -------------------------------------------------------------
+    setStatus('running', '代码拉取')
+    log(`[00:01] 正在执行真实 Git 拉取: ${project.repository} [分支: ${project.branch}]`, 'info', 'GIT_CLONE')
+
+    const hasGit = fs.existsSync(path.join(workspaceDir, '.git'))
+    let gitExitCode = 0
+
+    // 构造携带鉴权 Token 的 Git URL
+    let gitUrl = project.repository
+    if (project.gitToken && gitUrl.startsWith('https://')) {
+      const auth = project.gitUsername
+        ? `${encodeURIComponent(project.gitUsername)}:${encodeURIComponent(project.gitToken)}@`
+        : `${encodeURIComponent(project.gitToken)}@`
+      gitUrl = gitUrl.replace('https://', `https://${auth}`)
+    }
+
+    if (deployment.triggerType === 'rollback' && deployment.commitHash && deployment.commitHash !== '获取中...') {
+      log(`[00:01] 【一键回滚】定位检出历史版本 Commit: [${deployment.commitHash}]`, 'info', 'GIT_CLONE')
+      if (!hasGit) {
+        gitExitCode = await this.spawnShell(
+          `git clone ${gitUrl} . && git checkout ${deployment.commitHash}`,
+          workspaceDir,
+          {},
+          abortController.signal,
+          log
+        )
+      } else {
+        gitExitCode = await this.spawnShell(
+          `git fetch origin && git checkout ${deployment.commitHash}`,
+          workspaceDir,
+          {},
+          abortController.signal,
+          log
+        )
+      }
+    } else if (!hasGit) {
+      gitExitCode = await this.spawnShell(
+        `git clone --depth=1 --branch ${project.branch} ${gitUrl} .`,
+        workspaceDir,
+        {},
+        abortController.signal,
+        log
+      )
+    } else {
+      gitExitCode = await this.spawnShell(
+        `git fetch origin ${project.branch} && git checkout ${project.branch} && git pull origin ${project.branch}`,
+        workspaceDir,
+        {},
+        abortController.signal,
+        log
+      )
+    }
+
+    if (abortController.signal.aborted) return
+
+    if (gitExitCode !== 0) {
+      log(`[!] Git 拉取命令返回非零退出码 (${gitExitCode})`, 'error', 'GIT_CLONE')
+      // 如果是非法/测试用的模拟地址，给出诊断信息
+      if (project.repository.includes('github.com/team/')) {
+        log(`[提示] 检测到示例仓库地址无法真实访问。如需演示真实 Shell，建议新建项目填入真实可访问的公共 Git 仓库地址。`, 'warning', 'GIT_CLONE')
+      }
+      throw new Error(`Git 代码拉取失败 (退出码: ${gitExitCode})`)
+    }
+
+    // -------------------------------------------------------------
+    // 从本地检出的 Git 仓库中动态获取真实的 commitHash 与 commitMessage
+    // -------------------------------------------------------------
+    const gitInfo = await this.getGitCommitInfo(workspaceDir)
+    const effectiveCommitHash =
+      gitInfo.hash || (deployment.commitHash && deployment.commitHash !== '获取中...' ? deployment.commitHash : '')
+
+    if (gitInfo.hash) {
+      deployment.commitHash = gitInfo.hash
+      deployment.commitMessage = gitInfo.message
+      updateDeployment(deploymentId, {
+        commitHash: gitInfo.hash,
+        commitMessage: gitInfo.message,
+      })
+      this.emit(deploymentId, {
+        type: 'status',
+        deploymentId,
+        payload: {
+          commitHash: gitInfo.hash,
+          commitMessage: gitInfo.message,
+        },
+      })
+      log(
+        `[00:03] ✓ 成功检出最新提交 [${gitInfo.hash}]: ${gitInfo.message}${
+          gitInfo.author ? ` (提交者: ${gitInfo.author})` : ''
+        }`,
+        'success',
+        'GIT_CLONE'
+      )
+    } else {
+      log(`[00:03] ✓ 代码检出成功完成`, 'success', 'GIT_CLONE')
+    }
+
+    // -------------------------------------------------------------
+    // 生成与绑定 Docker 镜像版本标签（方案 B：时间戳 + Git短Hash）
+    // -------------------------------------------------------------
+    const isDockerMode =
+      project.artifactType === 'docker' ||
+      (project.artifactType !== 'tar' &&
+        (project.runtime === 'Docker' ||
+          (project.buildCommand && project.buildCommand.toLowerCase().includes('docker build'))))
+
+    if (isDockerMode) {
+      const versionTag = generateDockerVersionTag(effectiveCommitHash || deploymentId)
+      deployment.versionTag = versionTag
+      updateDeployment(deploymentId, { versionTag })
+      this.emit(deploymentId, {
+        type: 'status',
+        deploymentId,
+        payload: { versionTag },
+      })
+      log(
+        `[00:03] 【Docker 版本化管理 (方案B)】自动分配版本标签: [${versionTag}] (基于时间戳 + Git Hash: ${effectiveCommitHash || 'auto'})`,
+        'success',
+        'GIT_CLONE'
+      )
+    }
+
+    if (abortController.signal.aborted) return
+
+    // -------------------------------------------------------------
+    // 阶段 2: 依赖安装
+    // -------------------------------------------------------------
+    if (project.installCommand && project.installCommand.trim()) {
+      setStatus('running', '依赖安装')
+      log(`[00:04] 执行依赖安装命令: ${project.installCommand}`, 'info', 'DEPENDENCY')
+
+      const installExit = await this.spawnShell(
+        project.installCommand,
+        workspaceDir,
+        {},
+        abortController.signal,
+        log
+      )
+
+      if (abortController.signal.aborted) return
+      if (installExit !== 0) {
+        throw new Error(`依赖安装失败 (退出码: ${installExit})`)
+      }
+      log(`[00:06] ✓ 依赖安装顺利完成`, 'success', 'DEPENDENCY')
+    }
+
+    if (abortController.signal.aborted) return
+
+    // -------------------------------------------------------------
+    // 阶段 3: 应用构建
+    // -------------------------------------------------------------
+    if (project.buildCommand && project.buildCommand.trim()) {
+      setStatus('running', '应用构建')
+
+      let effectiveBuildCmd = project.buildCommand
+      if (isDockerMode && effectiveBuildCmd.toLowerCase().includes('docker build') && deployment.versionTag) {
+        const baseName = this.extractDockerBaseImageName(effectiveBuildCmd, project.name)
+        const versionedTag = `${baseName}:${deployment.versionTag}`
+        const latestTag = `${baseName}:latest`
+
+        if (effectiveBuildCmd.match(/(?:-t|--tag)\s+[^\s]+/)) {
+          effectiveBuildCmd = effectiveBuildCmd.replace(
+            /(?:-t|--tag)\s+[^\s]+/,
+            `-t ${versionedTag} -t ${latestTag}`
+          )
+        } else {
+          effectiveBuildCmd = effectiveBuildCmd.replace(
+            /docker\s+build/i,
+            `docker build -t ${versionedTag} -t ${latestTag}`
+          )
+        }
+        log(`[00:07] 【Docker 版本化管理 (方案B)】自动注入双重标签:`, 'info', 'BUILD')
+        log(`[00:07] ➔ 永久不可变版本: ${versionedTag}`, 'info', 'BUILD')
+        log(`[00:07] ➔ 运行时最新别名: ${latestTag}`, 'info', 'BUILD')
+      }
+
+      log(`[00:07] 执行应用构建命令: ${effectiveBuildCmd}`, 'info', 'BUILD')
+
+      const envMap: Record<string, string> = {}
+      if (project.envVars && project.envVars.length > 0) {
+        project.envVars.forEach((ev) => {
+          envMap[ev.key] = ev.value
+        })
+        log(`[00:07] 注入环境变量: ${project.envVars.map((e) => `${e.key}=${e.isSecret ? '******' : e.value}`).join(', ')}`, 'info', 'BUILD')
+      }
+
+      const buildExit = await this.spawnShell(
+        effectiveBuildCmd,
+        workspaceDir,
+        envMap,
+        abortController.signal,
+        log
+      )
+
+      if (abortController.signal.aborted) return
+      if (buildExit !== 0) {
+        throw new Error(`应用构建失败 (退出码: ${buildExit})`)
+      }
+      log(`[00:10] ✓ 应用构建成功完成`, 'success', 'BUILD')
+    }
+
+    if (abortController.signal.aborted) return
+
+    // -------------------------------------------------------------
+    // 阶段 4: 服务部署与进程启动 (本机直接运行 vs 远程 SSH 连接)
+    // -------------------------------------------------------------
+    setStatus('running', '服务部署')
+
+    const isLocalhost =
+      project.serverIp === '127.0.0.1' ||
+      project.serverIp === 'localhost' ||
+      project.serverIp.trim() === ''
+
+    if (isLocalhost) {
+      log(`[00:11] 目标为本机节点 (127.0.0.1)，执行本地 Shell 启动: ${project.startCommand}`, 'info', 'DEPLOY')
+      if (project.startCommand && project.startCommand.trim()) {
+        const startExit = await this.spawnShell(
+          project.startCommand,
+          workspaceDir,
+          {},
+          abortController.signal,
+          log
+        )
+        if (startExit !== 0) {
+          throw new Error(`服务启动命令返回错误码: ${startExit}`)
+        }
+      }
+      log(`[00:12] ✓ 本地服务启动命令已派发`, 'success', 'DEPLOY')
+    } else {
+      // 远程主机部署：必须通过 SSH 连接
+      log(`[00:11] 开始连接远程主机部署: ${project.serverIp}:${server?.port || 22}...`, 'info', 'DEPLOY')
+
+      if (!server) {
+        throw new Error(
+          `未找到目标服务器【${project.serverIp}】的登记节点与 SSH 认证凭据。请先在【主机管理】中登记该服务器并配置 SSH 密码或私钥！`
+        )
+      }
+
+      log(
+        `[00:11] SSH 认证主体: 用户【${server.user}】，认证模式: 【${
+          server.authType === 'privateKey' ? 'SSH私钥' : '密码认证'
+        }】`,
+        'info',
+        'DEPLOY'
+      )
+
+      await this.executeRemoteDeployment(
+        server,
+        project,
+        workspaceDir,
+        deploymentId,
+        abortController.signal,
+        log,
+        setStatus,
+        deployment.versionTag
+      )
+      log(`[00:15] ✓ 远程 SSH 产物分发与服务部署全流程顺利完成`, 'success', 'DEPLOY')
+    }
+
+    if (abortController.signal.aborted) return
+
+    // -------------------------------------------------------------
+    // 阶段 5: 健康检查
+    // -------------------------------------------------------------
+    setStatus('running', '健康检查')
+    const healthUrl =
+      project.healthCheckUrl || `http://${project.serverIp}:${project.port}/health`
+    log(`[00:14] 发起服务健康探测: ${healthUrl}`, 'info', 'HEALTH')
+
+    try {
+      const resp = await fetch(healthUrl, { signal: AbortSignal.timeout(3000) })
+      log(`[00:15] ✓ 健康探针响应 HTTP ${resp.status} (${resp.statusText || 'OK'})`, 'success', 'HEALTH')
+    } catch (healthErr: any) {
+      log(`[!] 健康检查探针提示: ${healthErr.message} (服务可能仍在启动或探针路径需调整)`, 'warning', 'HEALTH')
+    }
+
+    // 成功完成
+    const durationSeconds = Math.round((Date.now() - startTime) / 1000)
+    log(`[00:15] ✓ 【真实系统流水线】执行顺利完成！总耗时: ${durationSeconds} 秒`, 'success', 'COMPLETE')
+
+    updateDeployment(deploymentId, {
+      status: 'success',
+      endTime: new Date().toISOString(),
+      durationSeconds,
+      currentStep: '部署完成',
+    })
+    updateProject(project.id, {
+      status: 'active',
+      lastDeployed: '刚刚',
+    })
+
+    this.emit(deploymentId, {
+      type: 'status',
+      deploymentId,
+      payload: { status: 'success', currentStep: '部署完成', durationSeconds },
+    })
+    this.emit(deploymentId, {
+      type: 'end',
+      deploymentId,
+      payload: { status: 'success' },
+    })
+  }
+
+  /**
+   * 从检出的 Git 工作目录中获取实际 Commit Hash 与 Commit Message
+   */
+  private getGitCommitInfo(
+    workspaceDir: string
+  ): Promise<{ hash: string; message: string; author: string }> {
+    return new Promise((resolve) => {
+      exec(
+        'git log -1 --format="%h%x09%s%x09%an"',
+        { cwd: workspaceDir, timeout: 5000 },
+        (err, stdout) => {
+          if (err || !stdout.trim()) {
+            resolve({ hash: '', message: '', author: '' })
+          } else {
+            const parts = stdout.trim().split('\t')
+            resolve({
+              hash: parts[0] || '',
+              message: parts[1] || '',
+              author: parts[2] || '',
+            })
+          }
+        }
+      )
+    })
+  }
+
+  /**
+   * 从构建命令中提取 Docker 镜像标签 (如 docker build -t app:latest . -> app:latest)
+   */
+  private extractDockerImageTag(buildCommand: string, fallbackName: string): string {
+    const match = buildCommand.match(/(?:-t|--tag)\s+([^\s]+)/)
+    if (match && match[1]) {
+      return match[1].replace(/["']/g, '').trim()
+    }
+    return `${fallbackName.toLowerCase().replace(/[^a-z0-9_.-]/g, '-')}:latest`
+  }
+
+  /**
+   * 从构建命令中提取 Docker 镜像的基础名称（不带 tag，例如 order-service:latest -> order-service）
+   */
+  private extractDockerBaseImageName(buildCommand: string, fallbackName: string): string {
+    const fullTag = this.extractDockerImageTag(buildCommand, fallbackName)
+    const parts = fullTag.split(':')
+    return parts[0] || fallbackName.toLowerCase().replace(/[^a-z0-9_.-]/g, '-')
+  }
+
+  /**
+   * 将本地 Docker 镜像通过 docker save 导出并压缩为 tar.gz
+   */
+  private exportDockerImage(imageTag: string, archivePath: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const parentDir = path.dirname(archivePath)
+      if (!fs.existsSync(parentDir)) {
+        fs.mkdirSync(parentDir, { recursive: true })
+      }
+
+      const dockerProcess = spawn('docker', ['save', imageTag])
+      const gzip = zlib.createGzip({ level: 6 })
+      const writeStream = fs.createWriteStream(archivePath)
+      let stderrText = ''
+
+      dockerProcess.stderr?.on('data', (chunk) => {
+        stderrText += chunk.toString()
+      })
+
+      dockerProcess.on('error', (err) => {
+        writeStream.destroy()
+        reject(
+          new Error(
+            `无法调用宿主机 docker 命令: ${err.message}。请确认宿主机已安装 Docker 并且当前系统用户有权执行 docker save 命令`
+          )
+        )
+      })
+
+      pipeline(dockerProcess.stdout, gzip, writeStream, (err) => {
+        if (err) {
+          reject(new Error(`Docker 镜像压缩保存失败: ${err.message}`))
+        } else if (dockerProcess.exitCode !== null && dockerProcess.exitCode !== 0) {
+          reject(
+            new Error(
+              `docker save 命令返回非零退出码 (${dockerProcess.exitCode}): ${
+                stderrText.trim() || '未找到镜像 ' + imageTag
+              }`
+            )
+          )
+        } else {
+          resolve()
+        }
+      })
+    })
+  }
+
+  /**
+   * 将工作空间构建产物打包为 tar.gz 归档文件（自动排除 .git 源码元数据）
+   */
+  private packageTarArtifact(workspaceDir: string, archivePath: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const parentDir = path.dirname(archivePath)
+      if (!fs.existsSync(parentDir)) {
+        fs.mkdirSync(parentDir, { recursive: true })
+      }
+      // 使用系统内置 tar (Windows 10+ 与 Linux 均原生内置)
+      const tarProcess = spawn('tar', ['-czf', archivePath, '--exclude=.git', '.'], {
+        cwd: workspaceDir,
+      })
+
+      tarProcess.on('close', (code) => {
+        if (code === 0) {
+          resolve()
+        } else {
+          reject(new Error(`产物打包失败，tar 进程退出码: ${code}`))
+        }
+      })
+      tarProcess.on('error', (err) => {
+        reject(new Error(`产物打包执行异常: ${err.message}`))
+      })
+    })
+  }
+
+  /**
+   * 远程主机真实部署流水线（支持两套独立机制：Docker 镜像分发 vs 常规文件/源码 tar 包分发）
+   */
+  private executeRemoteDeployment(
+    server: ServerNode,
+    project: Project,
+    workspaceDir: string,
+    deploymentId: string,
+    signal: AbortSignal,
+    log: (text: string, type?: 'info' | 'success' | 'error' | 'warning', step?: string) => void,
+    setStatus: (status: DeploymentStatus, currentStep?: string) => void,
+    versionTag?: string
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        return reject(new Error('Operation aborted'))
+      }
+
+      const conn = new Client()
+      let isDone = false
+
+      const cleanup = () => {
+        if (!isDone) {
+          isDone = true
+          try {
+            conn.end()
+          } catch {}
+        }
+      }
+
+      signal.addEventListener('abort', () => {
+        cleanup()
+        reject(new Error('部署已手动中止'))
+      })
+
+      conn
+        .on('ready', async () => {
+          log(`[00:11] ✓ SSH 安全隧道握手成功 (目标节点: ${server.name} [${server.ip}])`, 'success', 'SSH')
+
+          try {
+            const artifactDir = path.join(process.cwd(), '.cicd_artifacts', project.id)
+            const isDockerMode =
+              project.artifactType === 'docker' ||
+              (project.artifactType !== 'tar' &&
+                (project.runtime === 'Docker' ||
+                  (project.buildCommand && project.buildCommand.toLowerCase().includes('docker build'))))
+
+            if (isDockerMode) {
+              // =============================================================
+              // 机制一：Docker 镜像分发抽象层 (策略工厂自动派发 Save/Load 或 Registry)
+              // =============================================================
+              const imageTag = this.extractDockerImageTag(project.buildCommand, project.name)
+              const settings = getSettings()
+              const distributor = DockerDistributorFactory.getDistributor(project, settings)
+
+              log(
+                `[00:11] 识别为【Docker 镜像分发模式】，版本标签: [${versionTag || 'latest'}]，策略引擎派发: 【${
+                  distributor.mode === 'registry'
+                    ? '企业级镜像仓库 (docker push/pull)'
+                    : 'SFTP 离线直连 (docker save/load)'
+                }】`,
+                'info',
+                'DOCKER_STRATEGY'
+              )
+
+              await distributor.distribute({
+                isSimulation: false,
+                project,
+                deploymentId,
+                imageTag,
+                versionTag,
+                server,
+                sshConn: conn,
+                signal,
+                log,
+                setStatus,
+                settings,
+                workspaceDir,
+              })
+
+              if (signal.aborted) {
+                cleanup()
+                return reject(new Error('部署已手动中止'))
+              }
+
+              // 容器启动 / 重载
+              if (project.startCommand && project.startCommand.trim()) {
+                setStatus('running', '容器启动')
+                log(`[00:15] 正在目标主机远程执行容器启动命令: ${project.startCommand}`, 'info', 'STARTUP')
+
+                await new Promise<void>((resolveStart, rejectStart) => {
+                  conn.exec(wrapSshCommand(project.startCommand), (err, stream) => {
+                    if (err) return rejectStart(err)
+
+                    stream
+                      .on('close', (code: number) => {
+                        if (code === 0) {
+                          resolveStart()
+                        } else {
+                          rejectStart(new Error(`远程容器启动命令返回退出码: ${code}`))
+                        }
+                      })
+                      .on('data', (data: Buffer) => {
+                        const text = data.toString('utf-8').trim()
+                        if (text) {
+                          text.split('\n').forEach((line) => log(`[remote] ${line}`, 'info', 'STARTUP'))
+                        }
+                      })
+                      .stderr.on('data', (data: Buffer) => {
+                        const text = data.toString('utf-8').trim()
+                        if (text) {
+                          text.split('\n').forEach((line) => log(`[remote-err] ${line}`, 'warning', 'STARTUP'))
+                        }
+                      })
+                  })
+                })
+
+                log(`[00:16] ✓ 远程容器启动命令执行完毕`, 'success', 'STARTUP')
+              } else {
+                log(`[00:15] 未配置容器启动命令，镜像分发载入即为完成`, 'info', 'STARTUP')
+              }
+            } else {
+              // =============================================================
+              // 机制二：常规文件/代码包分发机制 (tar -czf -> SFTP -> tar -xzf)
+              // =============================================================
+              const archiveName = `${deploymentId}_app.tar.gz`
+              const localArchivePath = path.join(artifactDir, archiveName)
+
+              setStatus('running', '产物打包')
+              log(`[00:11] 识别为【常规文件包分发模式】，正在通过 [tar] 打包应用文件 (排除 .git)...`, 'info', 'TAR_PACKAGE')
+              await this.packageTarArtifact(workspaceDir, localArchivePath)
+
+              const stat = fs.statSync(localArchivePath)
+              const sizeStr =
+                stat.size > 1024 * 1024
+                  ? `${(stat.size / (1024 * 1024)).toFixed(2)} MB`
+                  : `${(stat.size / 1024).toFixed(1)} KB`
+              log(`[00:12] ✓ 交付产物打包完成: ${archiveName} (${sizeStr})`, 'success', 'TAR_PACKAGE')
+
+              if (signal.aborted) {
+                cleanup()
+                return reject(new Error('部署已手动中止'))
+              }
+
+              // SFTP 远程分发
+              setStatus('running', '产物分发')
+              log(`[00:12] 正在建立 SFTP 文件传输会话，准备分发产物至 ${server.ip}...`, 'info', 'TAR_TRANSFER')
+
+              const sftp = await new Promise<any>((resolveSftp, rejectSftp) => {
+                conn.sftp((err, sftpSession) => {
+                  if (err) return rejectSftp(new Error(`SFTP 会话建立失败: ${err.message}`))
+                  resolveSftp(sftpSession)
+                })
+              })
+
+              const remoteTempArchive = `/tmp/cicd_deploy_${deploymentId}.tar.gz`
+              log(`[00:13] 正在通过 SFTP 安全通道上传产物至目标主机临时目录...`, 'info', 'TAR_TRANSFER')
+
+              await new Promise<void>((resolvePut, rejectPut) => {
+                sftp.fastPut(localArchivePath, remoteTempArchive, (putErr: any) => {
+                  if (putErr) return rejectPut(new Error(`SFTP 产物传输中断: ${putErr.message}`))
+                  resolvePut()
+                })
+              })
+              log(`[00:13] ✓ SFTP 产物上传完成，正在远程解压同步至部署目录: ${project.deployPath}...`, 'success', 'TAR_TRANSFER')
+
+              if (signal.aborted) {
+                cleanup()
+                return reject(new Error('部署已手动中止'))
+              }
+
+              // 目标服务器解压与目录同步
+              setStatus('running', '解压部署')
+              const unpackCmd = `mkdir -p "${project.deployPath}" && tar -xzf "${remoteTempArchive}" -C "${project.deployPath}" && rm -f "${remoteTempArchive}"`
+
+              await new Promise<void>((resolveUnpack, rejectUnpack) => {
+                conn.exec(wrapSshCommand(unpackCmd), (err, stream) => {
+                  if (err) return rejectUnpack(err)
+                  let remoteErr = ''
+                  stream.stderr.on('data', (d: Buffer) => {
+                    remoteErr += d.toString()
+                  })
+                  stream.resume()
+                  stream.on('close', (code: number) => {
+                    if (code === 0) {
+                      resolveUnpack()
+                    } else {
+                      if (remoteErr.includes('Permission denied')) {
+                        rejectUnpack(
+                          new Error(
+                            `目标服务器部署路径创建或解压失败 (权限不足): ${remoteErr.trim()}。\n提示：当前 SSH 登录用户【${server.user}】对该目录无写权限，建议将部署路径设置为用户家目录下（例如 ~/apps/${project.name}），或提前在服务器执行 sudo chown 为其授权。`
+                          )
+                        )
+                      } else {
+                        rejectUnpack(new Error(`远程产物解压部署返回退出码 ${code}: ${remoteErr.trim() || '未知异常'}`))
+                      }
+                    }
+                  })
+                })
+              })
+
+              log(`[00:14] ✓ 交付产物已成功在远程主机就绪，目标部署目录同步完成`, 'success', 'TAR_UNPACK')
+
+              if (signal.aborted) {
+                cleanup()
+                return reject(new Error('部署已手动中止'))
+              }
+
+              // 服务进程启动 / 重载
+              if (project.startCommand && project.startCommand.trim()) {
+                setStatus('running', '服务启动')
+                const remoteStartCmd = `cd "${project.deployPath}" && ${project.startCommand}`
+                log(`[00:15] 远程执行启动指令: ${project.startCommand}`, 'info', 'STARTUP')
+
+                await new Promise<void>((resolveStart, rejectStart) => {
+                  conn.exec(wrapSshCommand(remoteStartCmd), (err, stream) => {
+                    if (err) return rejectStart(err)
+
+                    stream
+                      .on('close', (code: number) => {
+                        if (code === 0) {
+                          resolveStart()
+                        } else {
+                          rejectStart(new Error(`远程服务启动命令返回退出码: ${code}`))
+                        }
+                      })
+                      .on('data', (data: Buffer) => {
+                        const text = data.toString('utf-8').trim()
+                        if (text) {
+                          text.split('\n').forEach((line) => log(`[remote] ${line}`, 'info', 'STARTUP'))
+                        }
+                      })
+                      .stderr.on('data', (data: Buffer) => {
+                        const text = data.toString('utf-8').trim()
+                        if (text) {
+                          text.split('\n').forEach((line) => log(`[remote-err] ${line}`, 'warning', 'STARTUP'))
+                        }
+                      })
+                  })
+                })
+
+                log(`[00:16] ✓ 远程服务启动命令执行完毕`, 'success', 'STARTUP')
+              } else {
+                log(`[00:14] 未配置启动命令，交付产物远程同步即为部署完成`, 'info', 'STARTUP')
+              }
+            }
+
+            cleanup()
+            resolve()
+          } catch (deployErr: any) {
+            cleanup()
+            reject(deployErr)
+          }
+        })
+        .on('error', (err: any) => {
+          cleanup()
+          const msg = err?.message || ''
+          if (msg.includes('authentication') || msg.includes('All configured authentication methods failed')) {
+            reject(
+              new Error(
+                `远程 SSH 鉴权失败：用户名【${server.user}】或 ${server.authType === 'privateKey' ? '私钥' : '密码'}错误`
+              )
+            )
+          } else if (msg.includes('ETIMEDOUT') || msg.includes('timeout') || msg.includes('ECONNREFUSED')) {
+            reject(
+              new Error(
+                `远程目标主机【${server.ip}:${server.port}】网络不可达或拒绝连接，请确认网络路由与防火墙`
+              )
+            )
+          } else {
+            reject(err)
+          }
+        })
+
+      const connConfig: any = {
+        host: server.ip,
+        port: server.port || 22,
+        username: server.user || 'root',
+        readyTimeout: 5000,
+      }
+
+      if (server.authType === 'privateKey') {
+        connConfig.privateKey = server.privateKey
+        if (server.passphrase) connConfig.passphrase = server.passphrase
+      } else {
+        connConfig.password = server.password || ''
+      }
+
+      conn.connect(connConfig)
+    })
+  }
+
+  /**
+   * 本地子进程执行与标准输出实时捕获
+   */
+  private spawnShell(
+    command: string,
+    cwd: string,
+    customEnv: Record<string, string>,
+    signal: AbortSignal,
+    log: (text: string, type?: 'info' | 'success' | 'error' | 'warning', step?: string) => void
+  ): Promise<number> {
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        return reject(new Error('Operation aborted'))
+      }
+
+      const isWindows = process.platform === 'win32'
+      const shell = isWindows ? 'cmd.exe' : '/bin/sh'
+      const shellArgs = isWindows ? ['/c', command] : ['-c', command]
+
+      const child = spawn(shell, shellArgs, {
+        cwd,
+        env: { ...process.env, ...customEnv },
+      })
+
+      const onAbort = () => {
+        child.kill()
+        reject(new Error('命令已手动终止'))
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+
+      child.stdout?.on('data', (chunk) => {
+        const text = chunk.toString('utf-8').trim()
+        if (text) {
+          text.split('\n').forEach((line: string) => log(`> ${line}`, 'info'))
+        }
+      })
+
+      child.stderr?.on('data', (chunk) => {
+        const text = chunk.toString('utf-8').trim()
+        if (text) {
+          // git clone progress or warnings often come through stderr
+          const isRealError = text.toLowerCase().includes('error:') || text.toLowerCase().includes('fatal:')
+          text.split('\n').forEach((line: string) => log(`> ${line}`, isRealError ? 'error' : 'warning'))
+        }
+      })
+
+      child.on('error', (err) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(err)
+      })
+
+      child.on('close', (code) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(code ?? 0)
+      })
+    })
+  }
+
+  /**
+   * 沙箱模拟执行引擎 (适用于开发测试与离线演示)
+   */
+  private async executeSimulatedPipeline(
+    project: Project,
+    deployment: Deployment,
+    abortController: AbortController,
+    log: (text: string, type?: 'info' | 'success' | 'error' | 'warning', step?: string) => void,
+    setStatus: (status: DeploymentStatus, currentStep?: string) => void,
+    startTime: number
+  ): Promise<void> {
+    const deploymentId = deployment.id
+    setStatus('running', '初始化环境')
+    updateProject(project.id, { status: 'deploying' })
+
+    log(`[00:00] 启动【沙箱模拟模式】部署流水线...`, 'info', 'INIT')
+    log(`[00:00] 部署ID: ${deploymentId} | 目标服务器: ${project.serverName} (${project.serverIp})`, 'info', 'INIT')
+    log(`[00:00] Git 仓库: ${project.repository} [${project.branch}]`, 'info', 'INIT')
+
+    if (abortController.signal.aborted) return
+
+    // Step 1: Git Checkout
+    setStatus('running', '代码拉取')
+    log(`[00:01] 正在连接 Git 远程仓库拉取分支 [${project.branch}]...`, 'info', 'GIT_CLONE')
+    await this.sleep(1200, abortController.signal)
+    log(`[00:02] ✓ 成功检出最新提交 [${deployment.commitHash}]: ${deployment.commitMessage}`, 'success', 'GIT_CLONE')
+
+    const isDockerSimMode =
+      project.artifactType === 'docker' ||
+      (project.artifactType !== 'tar' &&
+        (project.runtime === 'Docker' ||
+          (project.buildCommand && project.buildCommand.toLowerCase().includes('docker build'))))
+
+    if (isDockerSimMode) {
+      const versionTag = generateDockerVersionTag(deployment.commitHash || deploymentId)
+      deployment.versionTag = versionTag
+      updateDeployment(deploymentId, { versionTag })
+      this.emit(deploymentId, {
+        type: 'status',
+        deploymentId,
+        payload: { versionTag },
+      })
+      log(
+        `[00:02] 【Docker 版本化管理 (方案B)】自动分配版本标签: [${versionTag}] (基于时间戳 + Git Hash: ${deployment.commitHash || 'auto'})`,
+        'success',
+        'GIT_CLONE'
+      )
+    }
+
+    if (abortController.signal.aborted) return
+
+    // Step 2: Install Dependencies
+    setStatus('running', '安装依赖')
+    log(`[00:03] 执行依赖安装命令: ${project.installCommand || 'npm install'}`, 'info', 'DEPENDENCY')
+    await this.sleep(1800, abortController.signal)
+    log(`[00:05] ✓ 依赖安装完成，lockfile 校验通过`, 'success', 'DEPENDENCY')
+
+    if (abortController.signal.aborted) return
+
+    // Step 3: Build Application
+    setStatus('running', '编译构建')
+    log(`[00:05] 开始执行编译构建: ${project.buildCommand || 'npm run build'}`, 'info', 'BUILD')
+    if (project.envVars && project.envVars.length > 0) {
+      log(`[00:06] 注入环境变量: ${project.envVars.map((e) => `${e.key}=${e.isSecret ? '******' : e.value}`).join(', ')}`, 'info', 'BUILD')
+    }
+    if (isDockerSimMode && deployment.versionTag) {
+      const baseName = this.extractDockerBaseImageName(project.buildCommand || 'docker build -t app:latest .', project.name)
+      log(`[00:06] 【Docker 版本化构建】生成不可变镜像: [${baseName}:${deployment.versionTag}] 及运行别名: [${baseName}:latest]`, 'info', 'BUILD')
+    }
+    await this.sleep(2200, abortController.signal)
+    log(`[00:07] ✓ 编译产物打包就绪，生成优化产物包 (大小约 3.2MB)`, 'success', 'BUILD')
+
+    if (abortController.signal.aborted) return
+
+    // Step 4: Transfer & Deploy
+    if (isDockerSimMode) {
+      const tag = this.extractDockerImageTag(project.buildCommand || 'docker build -t app:latest .', project.name)
+      const settings = getSettings()
+      const distributor = DockerDistributorFactory.getDistributor(project, settings)
+      const fakeServer: ServerNode = {
+        id: project.serverId || 'srv-sim',
+        name: project.serverName,
+        ip: project.serverIp,
+        port: project.port,
+        user: 'root',
+        authType: 'password',
+        status: 'online',
+      }
+      await distributor.distribute({
+        isSimulation: true,
+        project,
+        deploymentId,
+        imageTag: tag,
+        versionTag: deployment.versionTag,
+        server: fakeServer,
+        signal: abortController.signal,
+        log,
+        setStatus,
+        settings,
+      })
+    } else {
+      setStatus('running', '产物打包')
+      log(`[00:08] 【文件模式】执行 [tar] 打包应用构建交付产物 (排除 .git)...`, 'info', 'TAR_PACKAGE')
+      await this.sleep(1200, abortController.signal)
+      setStatus('running', '产物分发')
+      log(`[00:09] 正在通过 SFTP 同步构建产物至目标主机 ${project.serverIp}:${project.deployPath}...`, 'info', 'TAR_TRANSFER')
+      await this.sleep(1400, abortController.signal)
+      setStatus('running', '解压部署')
+      log(`[00:10] ✓ 目标主机已解压产物至部署目录: ${project.deployPath}`, 'success', 'TAR_UNPACK')
+    }
+
+    if (abortController.signal.aborted) return
+
+    // Step 5: Start / Reload Process
+    setStatus('running', '服务启动')
+    log(`[00:10] SSH 远程执行启动指令: ${project.startCommand || 'npm start'}`, 'info', 'STARTUP')
+    await this.sleep(1400, abortController.signal)
+    log(`[00:11] ✓ 服务进程重载成功，PID 已分配，监听端口 :${project.port}`, 'success', 'STARTUP')
+
+    if (abortController.signal.aborted) return
+
+    // Step 6: Health Check
+    setStatus('running', '健康检查')
+    log(`[00:12] 发起健康探针检查: ${project.healthCheckUrl || `http://${project.serverIp}:${project.port}/health`}`, 'info', 'HEALTH')
+    await this.sleep(1000, abortController.signal)
+    log(`[00:13] ✓ 健康探针响应 HTTP 200 OK (耗时: 18ms)`, 'success', 'HEALTH')
+
+    // Complete
+    const durationSeconds = Math.round((Date.now() - startTime) / 1000)
+    log(`[00:14] ✓ 流水线执行成功！总耗时: ${durationSeconds} 秒`, 'success', 'COMPLETE')
+
+    updateDeployment(deploymentId, {
+      status: 'success',
+      endTime: new Date().toISOString(),
+      durationSeconds,
+      currentStep: '部署完成',
+    })
+    updateProject(project.id, {
+      status: 'active',
+      lastDeployed: '刚刚',
+    })
+
+    this.emit(deploymentId, {
+      type: 'status',
+      deploymentId,
+      payload: { status: 'success', currentStep: '部署完成', durationSeconds },
+    })
+    this.emit(deploymentId, {
+      type: 'end',
+      deploymentId,
+      payload: { status: 'success' },
+    })
+  }
+
+  private sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        return reject(new Error('Operation aborted'))
+      }
+
+      const timer = setTimeout(() => {
+        resolve()
+      }, ms)
+
+      if (signal) {
+        signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer)
+            reject(new Error('Operation aborted'))
+          },
+          { once: true }
+        )
+      }
+    })
+  }
+}
+
+// Global singleton instance
+const globalForPipeline = global as unknown as { pipelineManager?: PipelineManager }
+export const pipelineManager = globalForPipeline.pipelineManager || new PipelineManager()
+if (process.env.NODE_ENV !== 'production') globalForPipeline.pipelineManager = pipelineManager
