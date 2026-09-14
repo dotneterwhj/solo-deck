@@ -1,5 +1,6 @@
 'use client'
 
+import { useState } from 'react'
 import {
   X,
   Workflow,
@@ -9,14 +10,18 @@ import {
   RotateCcw,
   Webhook,
   CheckCircle2,
+  Boxes,
+  Sparkles,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { DockerfileGuideModal } from '@/components/dockerfile-guide-modal'
 
 interface HelpModalProps {
   onClose: () => void
 }
 
 export function HelpModal({ onClose }: HelpModalProps) {
+  const [showDockerfileModal, setShowDockerfileModal] = useState(false)
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
       <div className="w-full max-w-2xl rounded-xl bg-card border border-border shadow-2xl flex flex-col max-h-[90vh] overflow-hidden">
@@ -95,6 +100,26 @@ export function HelpModal({ onClose }: HelpModalProps) {
                 每个项目均拥有专属 Webhook 接收端点。将端点填入 GitHub、GitLab 或 Gitee 仓库的 Webhooks 配置中，即可在开发者 push 代码时实现自动构建。
               </p>
             </div>
+
+            <div className="p-3.5 rounded-lg border border-blue-500/30 bg-blue-500/5 space-y-1.5 md:col-span-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-foreground font-semibold">
+                  <Boxes className="size-4 text-blue-400" />
+                  6. Docker 容器化交付规范与 Dockerfile 放置
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowDockerfileModal(true)}
+                  className="text-[11px] text-blue-400 hover:text-blue-300 font-medium flex items-center gap-1"
+                >
+                  <Sparkles className="size-3" />
+                  查看 Dockerfile 模板库 ➔
+                </button>
+              </div>
+              <p>
+                采用 Docker 模式部署时，系统在仓库根目录执行 <code className="text-blue-400 font-mono">docker build .</code>。请务必将名为 <code className="text-blue-400 font-mono">Dockerfile</code>（无后缀）的文件存放在 Git 代码仓库根目录下并提交。平台支持多语言模板及 .dockerignore 优化方案。
+              </p>
+            </div>
           </div>
         </div>
 
@@ -105,6 +130,13 @@ export function HelpModal({ onClose }: HelpModalProps) {
           </Button>
         </div>
       </div>
+
+      {showDockerfileModal && (
+        <DockerfileGuideModal
+          isOpen={showDockerfileModal}
+          onClose={() => setShowDockerfileModal(false)}
+        />
+      )}
     </div>
   )
 }

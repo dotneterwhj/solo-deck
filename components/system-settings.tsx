@@ -14,6 +14,7 @@ import {
   Boxes,
   Eye,
   EyeOff,
+  Activity,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -37,6 +38,8 @@ export function SystemSettings() {
       password: '',
       defaultMode: 'save_load',
     },
+    enablePeriodicHealthCheck: true,
+    healthCheckIntervalSeconds: 30,
   })
 
   const [loading, setLoading] = useState(true)
@@ -230,7 +233,69 @@ export function SystemSettings() {
         </div>
       </div>
 
-      {/* 3. Docker Registry Configuration */}
+      {/* 3. Periodic Health Check Configuration */}
+      <div className="rounded-xl border border-border bg-card p-5 space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-bold text-foreground flex items-center gap-2">
+            <Activity className="size-4 text-primary" />
+            项目心跳探针与定时巡检配置 (Health Check Scheduler)
+          </h3>
+          <label className="flex items-center gap-2 text-xs font-medium text-foreground cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={settings.enablePeriodicHealthCheck ?? true}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  enablePeriodicHealthCheck: e.target.checked,
+                })
+              }
+              className="rounded border-border size-4"
+            />
+            启用后台定时自动巡检
+          </label>
+        </div>
+
+        <p className="text-xs text-muted-foreground">
+          刚部署完成时不再触发即时阻塞探针，避免因容器服务冷启动产生误报；心跳检测交由后台定时巡检任务异步执行，可按需配置巡检间隔时间。
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
+          <div>
+            <label className="text-xs font-semibold text-muted-foreground">
+              巡检探测频率 (Interval)
+            </label>
+            <select
+              value={settings.healthCheckIntervalSeconds || 30}
+              disabled={settings.enablePeriodicHealthCheck === false}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  healthCheckIntervalSeconds: Number(e.target.value),
+                })
+              }
+              className="w-full mt-1 flex h-9 rounded-md border border-input bg-card px-3 py-1 text-xs shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+            >
+              <option value={15}>每 15 秒 (高敏检测)</option>
+              <option value={30}>每 30 秒 (推荐默认)</option>
+              <option value={60}>每 60 秒 (低负载模式)</option>
+              <option value={120}>每 2 分钟</option>
+              <option value={300}>每 5 分钟 (轻量巡检)</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="text-xs font-semibold text-muted-foreground">
+              探测超时阈值与保护机制
+            </label>
+            <div className="mt-1 h-9 px-3 flex items-center rounded-md border border-border bg-muted/40 text-xs text-muted-foreground font-mono">
+              单次探针超时: 4000ms · 异步非阻塞 · 隔离探测
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 4. Docker Registry Configuration */}
       <div className="rounded-xl border border-border bg-card p-5 space-y-4">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-bold text-foreground flex items-center gap-2">

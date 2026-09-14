@@ -14,6 +14,10 @@ import {
   HardDrive,
   Boxes,
   FolderArchive,
+  FileCode,
+  Sparkles,
+  Copy,
+  FolderTree,
 } from 'lucide-react'
 import {
   RuntimeType,
@@ -23,6 +27,8 @@ import {
   ArtifactType,
   DockerDeliveryMode,
 } from '@/lib/types'
+import { DockerfileGuideModal } from '@/components/dockerfile-guide-modal'
+import { DOCKERFILE_TEMPLATES, DockerfileTemplate } from '@/lib/dockerfile-templates'
 
 type Step = 'basic' | 'git' | 'runtime' | 'server' | 'confirm'
 
@@ -173,6 +179,27 @@ export function NewProjectWizard({
     artifactType: 'auto',
     dockerDeliveryMode: 'auto',
   })
+
+  const [showDockerfileModal, setShowDockerfileModal] = useState(false)
+  const [selectedDockerTemplate, setSelectedDockerTemplate] = useState<DockerfileTemplate>(DOCKERFILE_TEMPLATES[0])
+  const [copiedDockerCode, setCopiedDockerCode] = useState(false)
+
+  const handleApplyDockerTemplate = (tmpl: DockerfileTemplate) => {
+    setSelectedDockerTemplate(tmpl)
+    const slug = toSafeSlug(data.projectName)
+    const port = tmpl.defaultPort
+    setData((prev) => ({
+      ...prev,
+      serverPort: port,
+      startCommand: `docker run -d -p ${port}:${port} --name ${slug} ${slug}:latest`,
+    }))
+  }
+
+  const handleCopyDockerCode = (code: string) => {
+    navigator.clipboard.writeText(code)
+    setCopiedDockerCode(true)
+    setTimeout(() => setCopiedDockerCode(false), 2000)
+  }
 
   useEffect(() => {
     fetch('/api/servers')
@@ -343,8 +370,7 @@ export function NewProjectWizard({
         installCommand: data.installCommand,
         buildCommand: data.buildCommand,
         startCommand: data.startCommand,
-        healthCheckUrl:
-          data.healthCheckUrl || `http://${data.serverIp}:${data.serverPort}/health`,
+        healthCheckUrl: data.healthCheckUrl?.trim() || '',
         runnerMode: data.runnerMode,
         artifactType: data.artifactType,
         dockerDeliveryMode: data.dockerDeliveryMode,
@@ -618,6 +644,107 @@ export function NewProjectWizard({
                   />
                 </div>
               </div>
+
+              {/* Dockerfile Requirement Guidance & Template Presets */}
+              {(data.runtime === 'Docker' ||
+                data.artifactType === 'docker' ||
+                data.buildCommand.toLowerCase().includes('docker build')) && (
+                <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 p-3.5 space-y-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <div className="size-6 rounded bg-blue-500/20 text-blue-400 flex items-center justify-center">
+                        <Boxes className="size-3.5" />
+                      </div>
+                      <div>
+                        <span className="text-xs font-bold text-foreground">
+                          Dockerfile 必备规范与模板库
+                        </span>
+                        <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 font-medium">
+                          必须放入项目根目录
+                        </span>
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="xs"
+                      onClick={() => setShowDockerfileModal(true)}
+                      className="text-xs text-blue-400 border-blue-500/30 hover:bg-blue-500/10"
+                    >
+                      <Sparkles className="size-3 mr-1" />
+                      打开完整模板库与放置指引
+                    </Button>
+                  </div>
+
+                  <div className="text-[11px] text-muted-foreground bg-background/60 rounded p-2.5 border border-border/60 space-y-1">
+                    <p className="text-foreground font-medium flex items-center gap-1.5">
+                      <span className="size-1.5 rounded-full bg-blue-400" />
+                      <strong>存放位置指引：</strong>
+                      请在 Git 代码仓库<strong>根目录</strong>下创建名为 <code className="text-blue-400 font-mono font-bold">Dockerfile</code> (无后缀) 的文件并提交。
+                    </p>
+                    <p className="pl-3 text-muted-foreground">
+                      构建流水线执行 <code className="font-mono text-foreground">docker build .</code> 时将自动以此文件为蓝本生成镜像。若仓库根目录下缺少该文件，构建将报错。
+                    </p>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-[11px] font-semibold text-muted-foreground">
+                        常用技术栈 Dockerfile 模板快速选用：
+                      </label>
+                      <span className="text-[10px] text-muted-foreground">点击切换预览并可同步端口</span>
+                    </div>
+                    <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
+                      {DOCKERFILE_TEMPLATES.map((tmpl) => (
+                        <button
+                          key={tmpl.id}
+                          type="button"
+                          onClick={() => setSelectedDockerTemplate(tmpl)}
+                          className={`p-1.5 rounded border text-center transition-all ${
+                            selectedDockerTemplate.id === tmpl.id
+                              ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
+                              : 'border-border hover:border-blue-500/40 text-muted-foreground hover:text-foreground bg-background/50'
+                          }`}
+                        >
+                          <span className="text-[11px] block truncate">{tmpl.category}</span>
+                          <span className="text-[9px] text-muted-foreground block font-mono">{tmpl.defaultPort}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Code Preview */}
+                  <div className="rounded border border-border/70 bg-[#0d1117] p-2.5 text-xs">
+                    <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-border/40 text-[11px]">
+                      <span className="font-mono text-neutral-300 flex items-center gap-1.5">
+                        <FileCode className="size-3 text-blue-400" />
+                        {selectedDockerTemplate.name}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleApplyDockerTemplate(selectedDockerTemplate)}
+                          className="text-[11px] text-primary hover:underline font-medium"
+                        >
+                          同步该端口 ({selectedDockerTemplate.defaultPort})
+                        </button>
+                        <span className="text-muted-foreground">•</span>
+                        <button
+                          type="button"
+                          onClick={() => handleCopyDockerCode(selectedDockerTemplate.dockerfile)}
+                          className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center gap-1 font-medium"
+                        >
+                          {copiedDockerCode ? <Check className="size-3 text-emerald-400" /> : <Copy className="size-3" />}
+                          {copiedDockerCode ? '已复制' : '复制代码'}
+                        </button>
+                      </div>
+                    </div>
+                    <pre className="font-mono text-[11px] text-neutral-300 max-h-[120px] overflow-y-auto leading-relaxed scrollbar-thin">
+                      <code>{selectedDockerTemplate.dockerfile}</code>
+                    </pre>
+                  </div>
+                </div>
+              )}
 
               {/* Artifact Delivery Mechanism */}
               <div className="space-y-3 pt-3 border-t border-border">
@@ -941,6 +1068,34 @@ export function NewProjectWizard({
                 </div>
               </div>
 
+              {(data.artifactType === 'docker' ||
+                (data.artifactType === 'auto' &&
+                  (data.runtime === 'Docker' ||
+                    data.buildCommand.toLowerCase().includes('docker build')))) && (
+                <div className="p-3.5 rounded-lg bg-blue-500/10 border border-blue-500/30 text-xs flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-2 text-blue-300">
+                    <Boxes className="size-4 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-semibold text-blue-200">
+                        Dockerfile 部署就绪检查
+                      </p>
+                      <p className="text-muted-foreground text-[11px] mt-0.5">
+                        使用 Docker 部署时，构建引擎将在代码根目录下执行 <code>docker build</code>。请确保已将 <code>Dockerfile</code> 提交并推送至 Git 远程分支。
+                      </p>
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="xs"
+                    onClick={() => setShowDockerfileModal(true)}
+                    className="text-xs text-blue-300 border-blue-500/30 hover:bg-blue-500/20 shrink-0"
+                  >
+                    查看 Dockerfile 模板与规范
+                  </Button>
+                </div>
+              )}
+
               <div className="p-3.5 rounded-lg bg-green-500/10 border border-green-500/30 text-green-500 text-xs flex items-center gap-2">
                 <Check className="size-4 shrink-0" />
                 <span>配置完整！点击下方【创建项目】即可写入数据库并进入交付列表。</span>
@@ -980,6 +1135,15 @@ export function NewProjectWizard({
           </div>
         </div>
       </div>
+
+      {showDockerfileModal && (
+        <DockerfileGuideModal
+          isOpen={showDockerfileModal}
+          onClose={() => setShowDockerfileModal(false)}
+          initialTemplateId={selectedDockerTemplate.id}
+          onApplyTemplate={handleApplyDockerTemplate}
+        />
+      )}
     </div>
   )
 }

@@ -46,17 +46,34 @@ export interface Project {
   serverId?: string
   serverIp: string
   serverName: string
+  serverTags?: string[]
   port: number
   deployPath: string
   installCommand: string
   buildCommand: string
   startCommand: string
   healthCheckUrl?: string
+  healthStatus?: HealthStatus
+  lastHealthCheck?: HealthCheckResult
   envVars?: EnvVariable[]
   runnerMode: RunnerMode
   lastDeployed?: string
+  lastCommitHash?: string
+  lastCommitMessage?: string
+  lastVersionTag?: string
   createdAt: string
   updatedAt: string
+}
+
+export type HealthStatus = 'healthy' | 'unhealthy' | 'unconfigured'
+
+export interface HealthCheckResult {
+  status: HealthStatus
+  statusCode?: number
+  responseTimeMs?: number
+  message?: string
+  checkedAt?: string
+  url?: string
 }
 
 export type DeploymentStatus =
@@ -139,6 +156,8 @@ export interface SystemSettings {
   notifyOnSuccess: boolean
   notifyOnFailure: boolean
   dockerRegistry?: DockerRegistryConfig
+  enablePeriodicHealthCheck?: boolean
+  healthCheckIntervalSeconds?: number
 }
 
 export interface DashboardStats {

@@ -25,10 +25,12 @@ import {
   Boxes,
   FolderArchive,
   Tag,
+  Sparkles,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Project, Deployment, EnvVariable, ArtifactType, DockerDeliveryMode } from '@/lib/types'
+import { DockerfileGuideModal } from '@/components/dockerfile-guide-modal'
 
 interface ProjectDetailModalProps {
   project: Project
@@ -52,6 +54,7 @@ export function ProjectDetailModal({
   const [loadingDeployments, setLoadingDeployments] = useState(false)
   const [copiedWebhook, setCopiedWebhook] = useState(false)
   const [rollingBackId, setRollingBackId] = useState<string | null>(null)
+  const [showDockerfileModal, setShowDockerfileModal] = useState(false)
 
   // Edit form state
   const [formData, setFormData] = useState({
@@ -567,6 +570,35 @@ export function ProjectDetailModal({
                   </div>
                 </div>
 
+                {(formData.artifactType === 'docker' ||
+                  (formData.artifactType === 'auto' &&
+                    (project.runtime === 'Docker' ||
+                      formData.buildCommand.toLowerCase().includes('docker build')))) && (
+                  <div className="p-3.5 rounded-lg border border-blue-500/30 bg-blue-500/5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+                    <div className="flex items-start gap-2.5">
+                      <Boxes className="size-4 text-blue-400 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-semibold text-foreground">
+                          Docker 容器化部署规范：确保代码仓库根目录下存在 Dockerfile
+                        </p>
+                        <p className="text-muted-foreground text-[11px] mt-0.5">
+                          构建引擎将在项目根目录下执行 <code className="text-blue-400 font-mono">docker build .</code>。请确保已将标准 <code className="text-blue-400 font-mono">Dockerfile</code> (无后缀) 提交并推送至 Git 远程分支。
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="xs"
+                      onClick={() => setShowDockerfileModal(true)}
+                      className="shrink-0 text-blue-400 border-blue-500/30 hover:bg-blue-500/10 text-xs"
+                    >
+                      <Sparkles className="size-3 mr-1" />
+                      查看 Dockerfile 模板与放置指引
+                    </Button>
+                  </div>
+                )}
+
                 <div className="p-4 rounded-lg border border-border bg-card">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
@@ -845,6 +877,14 @@ export function ProjectDetailModal({
           </Button>
         </div>
       </div>
+
+      {showDockerfileModal && (
+        <DockerfileGuideModal
+          isOpen={showDockerfileModal}
+          onClose={() => setShowDockerfileModal(false)}
+          initialTemplateId={project.runtime.toLowerCase()}
+        />
+      )}
     </div>
   )
 }

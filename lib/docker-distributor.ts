@@ -138,6 +138,10 @@ function runRemoteCommand(
     sshConn.exec(wrapSshCommand(cmd), (err, stream) => {
       if (err) return reject(err)
       let remoteErr = ''
+      let capturedExitCode: number | null | undefined = undefined
+      stream.on('exit', (c: any) => {
+        if (typeof c === 'number') capturedExitCode = c
+      })
       stream.on('data', (d: Buffer) => {
         const text = d.toString('utf-8').trim()
         if (text) {
@@ -148,7 +152,8 @@ function runRemoteCommand(
         remoteErr += d.toString()
       })
       stream.on('close', (code: number) => {
-        if (code === 0) {
+        const finalCode = typeof code === 'number' ? code : (typeof capturedExitCode === 'number' ? capturedExitCode : undefined)
+        if (finalCode === 0 || (finalCode === undefined && !remoteErr.trim())) {
           resolve()
         } else {
           if (remoteErr.includes('permission denied') || remoteErr.includes('docker daemon')) {
@@ -158,7 +163,7 @@ function runRemoteCommand(
               )
             )
           } else {
-            reject(new Error(`远程执行命令失败 (退出码 ${code}): ${remoteErr.trim() || '未知异常'}`))
+            reject(new Error(`远程执行命令失败 (退出码 ${finalCode ?? '未知'}): ${remoteErr.trim() || '未知异常'}`))
           }
         }
       })
@@ -285,6 +290,10 @@ export class DockerSaveLoadDistributor implements IDockerDistributor {
       sshConn.exec(wrapSshCommand(loadCmd), (err, stream) => {
         if (err) return rejectLoad(err)
         let remoteErr = ''
+        let capturedExitCode: number | null | undefined = undefined
+        stream.on('exit', (c: any) => {
+          if (typeof c === 'number') capturedExitCode = c
+        })
         stream.on('data', (d: Buffer) => {
           const text = d.toString('utf-8').trim()
           if (text) {
@@ -295,7 +304,8 @@ export class DockerSaveLoadDistributor implements IDockerDistributor {
           remoteErr += d.toString()
         })
         stream.on('close', (code: number) => {
-          if (code === 0) {
+          const finalCode = typeof code === 'number' ? code : (typeof capturedExitCode === 'number' ? capturedExitCode : undefined)
+          if (finalCode === 0 || (finalCode === undefined && !remoteErr.trim())) {
             resolveLoad()
           } else {
             if (remoteErr.includes('permission denied') || remoteErr.includes('docker daemon')) {
@@ -305,7 +315,7 @@ export class DockerSaveLoadDistributor implements IDockerDistributor {
                 )
               )
             } else {
-              rejectLoad(new Error(`远程 docker load 失败 (退出码 ${code}): ${remoteErr.trim() || '未知异常'}`))
+              rejectLoad(new Error(`远程 docker load 失败 (退出码 ${finalCode ?? '未知'}): ${remoteErr.trim() || '未知异常'}`))
             }
           }
         })

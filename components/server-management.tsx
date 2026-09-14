@@ -24,6 +24,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ServerNode, ServerAuthType } from '@/lib/types'
 import { ServerEnvModal } from './server-env-modal'
+import { formatRelativeTime } from '@/lib/time-utils'
 
 export function ServerManagement() {
   const [servers, setServers] = useState<ServerNode[]>([])
@@ -218,11 +219,10 @@ export function ServerManagement() {
                 <div className="flex items-start justify-between">
                   <div className="flex items-center gap-3">
                     <div
-                      className={`size-10 rounded-xl flex items-center justify-center ${
-                        isOnline
+                      className={`size-10 rounded-xl flex items-center justify-center ${isOnline
                           ? 'bg-green-500/10 text-green-500'
                           : 'bg-red-500/10 text-red-500'
-                      }`}
+                        }`}
                     >
                       <Server className="size-5" />
                     </div>
@@ -232,16 +232,14 @@ export function ServerManagement() {
                           {server.name}
                         </h3>
                         <span
-                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold ${
-                            isOnline
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold ${isOnline
                               ? 'bg-green-500/10 text-green-500'
                               : 'bg-red-500/10 text-red-500'
-                          }`}
+                            }`}
                         >
                           <span
-                            className={`size-1.5 rounded-full ${
-                              isOnline ? 'bg-green-500' : 'bg-red-500'
-                            }`}
+                            className={`size-1.5 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'
+                              }`}
                           />
                           {isOnline ? '连接正常' : '不可达/未鉴权'}
                         </span>
@@ -286,7 +284,7 @@ export function ServerManagement() {
                   <div>
                     <span className="text-muted-foreground block text-[11px]">上次探针</span>
                     <span className="font-medium text-foreground truncate block mt-0.5">
-                      {server.lastChecked || '刚刚'}
+                      {formatRelativeTime(server.lastChecked) || '刚刚'}
                     </span>
                   </div>
                 </div>
@@ -312,11 +310,10 @@ export function ServerManagement() {
                 {/* Test feedback */}
                 {testResults[server.id] && (
                   <div
-                    className={`p-2.5 rounded-lg text-xs font-mono flex items-start gap-2 ${
-                      testResults[server.id].ok
+                    className={`p-2.5 rounded-lg text-xs font-mono flex items-start gap-2 ${testResults[server.id].ok
                         ? 'bg-green-500/10 text-green-400 border border-green-500/20'
                         : 'bg-red-500/10 text-red-400 border border-red-500/20'
-                    }`}
+                      }`}
                   >
                     {testResults[server.id].ok ? (
                       <Check className="size-4 shrink-0 mt-0.5 text-green-500" />
@@ -436,11 +433,10 @@ export function ServerManagement() {
                   <button
                     type="button"
                     onClick={() => setNewServer({ ...newServer, authType: 'password' })}
-                    className={`p-3 rounded-lg border-2 text-left transition-all ${
-                      newServer.authType === 'password'
+                    className={`p-3 rounded-lg border-2 text-left transition-all ${newServer.authType === 'password'
                         ? 'border-primary bg-primary/5'
                         : 'border-border hover:border-primary/40'
-                    }`}
+                      }`}
                   >
                     <div className="flex items-center gap-2 font-semibold text-xs text-foreground">
                       <Lock className="size-3.5 text-primary" />
@@ -454,11 +450,10 @@ export function ServerManagement() {
                   <button
                     type="button"
                     onClick={() => setNewServer({ ...newServer, authType: 'privateKey' })}
-                    className={`p-3 rounded-lg border-2 text-left transition-all ${
-                      newServer.authType === 'privateKey'
+                    className={`p-3 rounded-lg border-2 text-left transition-all ${newServer.authType === 'privateKey'
                         ? 'border-primary bg-primary/5'
                         : 'border-border hover:border-primary/40'
-                    }`}
+                      }`}
                   >
                     <div className="flex items-center gap-2 font-semibold text-xs text-foreground">
                       <KeyRound className="size-3.5 text-primary" />

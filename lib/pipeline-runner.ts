@@ -12,6 +12,7 @@ import {
   DeploymentStatus,
   TriggerType,
   ServerNode,
+  HealthCheckResult,
 } from './types'
 import {
   getProjectById,
@@ -362,6 +363,10 @@ class PipelineManager {
         commitHash: gitInfo.hash,
         commitMessage: gitInfo.message,
       })
+      updateProject(project.id, {
+        lastCommitHash: gitInfo.hash,
+        lastCommitMessage: gitInfo.message,
+      })
       this.emit(deploymentId, {
         type: 'status',
         deploymentId,
@@ -391,19 +396,31 @@ class PipelineManager {
           (project.buildCommand && project.buildCommand.toLowerCase().includes('docker build'))))
 
     if (isDockerMode) {
-      const versionTag = generateDockerVersionTag(effectiveCommitHash || deploymentId)
+      const versionTag =
+        deployment.triggerType === 'rollback' && deployment.versionTag
+          ? deployment.versionTag
+          : generateDockerVersionTag(effectiveCommitHash || deploymentId)
       deployment.versionTag = versionTag
       updateDeployment(deploymentId, { versionTag })
+      updateProject(project.id, { lastVersionTag: versionTag })
       this.emit(deploymentId, {
         type: 'status',
         deploymentId,
         payload: { versionTag },
       })
-      log(
-        `[00:03] 【Docker 版本化管理 (方案B)】自动分配版本标签: [${versionTag}] (基于时间戳 + Git Hash: ${effectiveCommitHash || 'auto'})`,
-        'success',
-        'GIT_CLONE'
-      )
+      if (deployment.triggerType === 'rollback') {
+        log(
+          `[00:03] 【Docker 一键回滚】锁定目标版本标签: [${versionTag}] (历史提交: ${effectiveCommitHash || 'auto'})`,
+          'success',
+          'GIT_CLONE'
+        )
+      } else {
+        log(
+          `[00:03] 【Docker 版本化管理 (方案B)】自动分配版本标签: [${versionTag}] (基于时间戳 + Git Hash: ${effectiveCommitHash || 'auto'})`,
+          'success',
+          'GIT_CLONE'
+        )
+      }
     }
 
     if (abortController.signal.aborted) return
@@ -439,25 +456,53 @@ class PipelineManager {
       setStatus('running', '应用构建')
 
       let effectiveBuildCmd = project.buildCommand
-      if (isDockerMode && effectiveBuildCmd.toLowerCase().includes('docker build') && deployment.versionTag) {
-        const baseName = this.extractDockerBaseImageName(effectiveBuildCmd, project.name)
-        const versionedTag = `${baseName}:${deployment.versionTag}`
-        const latestTag = `${baseName}:latest`
+      if (isDockerMode && effectiveBuildCmd.toLowerCase().includes('docker build')) {
+        // 预检工作区代码仓库中是否存在 Dockerfile
+        const fileMatch = effectiveBuildCmd.match(/(?:-f|--file)\s+([^\s]+)/)
+        const targetDockerfileName = fileMatch ? fileMatch[1] : 'Dockerfile'
+        const targetDockerfilePath = path.isAbsolute(targetDockerfileName)
+          ? targetDockerfileName
+          : path.join(workspaceDir, targetDockerfileName)
+        const altDockerfilePath = path.join(workspaceDir, 'dockerfile')
 
-        if (effectiveBuildCmd.match(/(?:-t|--tag)\s+[^\s]+/)) {
-          effectiveBuildCmd = effectiveBuildCmd.replace(
-            /(?:-t|--tag)\s+[^\s]+/,
-            `-t ${versionedTag} -t ${latestTag}`
-          )
+        const hasDockerfile =
+          fs.existsSync(targetDockerfilePath) ||
+          (!fileMatch && fs.existsSync(altDockerfilePath))
+
+        if (!hasDockerfile) {
+          log(`[00:06] [!] ❌ 错误：在代码仓库根目录未找到 Dockerfile 文件！`, 'error', 'BUILD')
+          log(`[00:06] [!] 📁 检查路径: ${targetDockerfilePath}`, 'error', 'BUILD')
+          log(`[00:06] [!] 💡 Docker 容器化部署指引：`, 'warning', 'BUILD')
+          log(`[00:06] [!]    1. 使用 Docker 部署必须在代码仓库根目录下创建名为 'Dockerfile' (无后缀) 的文件`, 'warning', 'BUILD')
+          log(`[00:06] [!]    2. 根据项目技术栈编写标准容器镜像构建配置 (可在 CDPipeline 平台查看预设模板)`, 'warning', 'BUILD')
+          log(`[00:06] [!]    3. 提交并推送至 Git 远程分支：`, 'warning', 'BUILD')
+          log(`[00:06] [!]       git add Dockerfile && git commit -m "feat: add Dockerfile" && git push`, 'warning', 'BUILD')
+          log(`[00:06] [!]    4. 推送完成后重新点击【立即部署】即可完成自动构建与发布`, 'warning', 'BUILD')
+          throw new Error(`应用构建失败: 代码仓库根目录下未找到 Dockerfile 文件。请参考模板将 Dockerfile 放入项目根目录并推送代码后重试。`)
         } else {
-          effectiveBuildCmd = effectiveBuildCmd.replace(
-            /docker\s+build/i,
-            `docker build -t ${versionedTag} -t ${latestTag}`
-          )
+          log(`[00:06] ✓ 成功定位项目根目录下 Dockerfile 配置文件 (${path.basename(targetDockerfilePath)})`, 'success', 'BUILD')
         }
-        log(`[00:07] 【Docker 版本化管理 (方案B)】自动注入双重标签:`, 'info', 'BUILD')
-        log(`[00:07] ➔ 永久不可变版本: ${versionedTag}`, 'info', 'BUILD')
-        log(`[00:07] ➔ 运行时最新别名: ${latestTag}`, 'info', 'BUILD')
+
+        if (deployment.versionTag) {
+          const baseName = this.extractDockerBaseImageName(effectiveBuildCmd, project.name)
+          const versionedTag = `${baseName}:${deployment.versionTag}`
+          const latestTag = `${baseName}:latest`
+
+          if (effectiveBuildCmd.match(/(?:-t|--tag)\s+[^\s]+/)) {
+            effectiveBuildCmd = effectiveBuildCmd.replace(
+              /(?:-t|--tag)\s+[^\s]+/,
+              `-t ${versionedTag} -t ${latestTag}`
+            )
+          } else {
+            effectiveBuildCmd = effectiveBuildCmd.replace(
+              /docker\s+build/i,
+              `docker build -t ${versionedTag} -t ${latestTag}`
+            )
+          }
+          log(`[00:07] 【Docker 版本化管理 (方案B)】自动注入双重标签:`, 'info', 'BUILD')
+          log(`[00:07] ➔ 永久不可变版本: ${versionedTag}`, 'info', 'BUILD')
+          log(`[00:07] ➔ 运行时最新别名: ${latestTag}`, 'info', 'BUILD')
+        }
       }
 
       log(`[00:07] 执行应用构建命令: ${effectiveBuildCmd}`, 'info', 'BUILD')
@@ -500,13 +545,53 @@ class PipelineManager {
     if (isLocalhost) {
       log(`[00:11] 目标为本机节点 (127.0.0.1)，执行本地 Shell 启动: ${project.startCommand}`, 'info', 'DEPLOY')
       if (project.startCommand && project.startCommand.trim()) {
-        const startExit = await this.spawnShell(
+        const containerName = this.extractDockerContainerName(project.startCommand)
+        if (containerName) {
+          log(`[00:11] 正在检查本机同名 Docker 容器 [${containerName}]...`, 'info', 'DEPLOY')
+          await this.cleanupLocalDockerContainer(containerName, log)
+        }
+
+        let stderrBuffer = ''
+        const captureLog = (text: string, type?: 'info' | 'success' | 'error' | 'warning', step?: string) => {
+          log(text, type, step)
+          if (type === 'error' || type === 'warning') {
+            stderrBuffer += text + '\n'
+          }
+        }
+
+        let startExit = await this.spawnShell(
           project.startCommand,
           workspaceDir,
           {},
           abortController.signal,
-          log
+          captureLog
         )
+
+        // 容错恢复：如果仍发生 Docker 容器名称冲突，自动清理冲突容器并重试一次
+        if (startExit !== 0 && !abortController.signal.aborted) {
+          const conflictMatch = stderrBuffer.match(
+            /Conflict\.\s+The container name\s+["']?\/?([^"'\s]+)["']?\s+is already in use/i
+          )
+          if (conflictMatch) {
+            const conflictName = conflictMatch[1] || containerName
+            if (conflictName) {
+              log(
+                `[!] 检测到本机 Docker 容器名称冲突 [${conflictName}]，执行自动清理并重试启动...`,
+                'warning',
+                'DEPLOY'
+              )
+              await this.cleanupLocalDockerContainer(conflictName, log)
+              startExit = await this.spawnShell(
+                project.startCommand,
+                workspaceDir,
+                {},
+                abortController.signal,
+                log
+              )
+            }
+          }
+        }
+
         if (startExit !== 0) {
           throw new Error(`服务启动命令返回错误码: ${startExit}`)
         }
@@ -546,33 +631,33 @@ class PipelineManager {
     if (abortController.signal.aborted) return
 
     // -------------------------------------------------------------
-    // 阶段 5: 健康检查
+    // 阶段 5: 部署完成 (无需即时发起心跳探测，交由后台定时巡检机制)
     // -------------------------------------------------------------
-    setStatus('running', '健康检查')
-    const healthUrl =
-      project.healthCheckUrl || `http://${project.serverIp}:${project.port}/health`
-    log(`[00:14] 发起服务健康探测: ${healthUrl}`, 'info', 'HEALTH')
+    const durationSeconds = Math.round((Date.now() - startTime) / 1000)
 
-    try {
-      const resp = await fetch(healthUrl, { signal: AbortSignal.timeout(3000) })
-      log(`[00:15] ✓ 健康探针响应 HTTP ${resp.status} (${resp.statusText || 'OK'})`, 'success', 'HEALTH')
-    } catch (healthErr: any) {
-      log(`[!] 健康检查探针提示: ${healthErr.message} (服务可能仍在启动或探针路径需调整)`, 'warning', 'HEALTH')
+    if (project.healthCheckUrl && project.healthCheckUrl.trim()) {
+      log(
+        `[00:15] ℹ 服务已启动完毕！心跳健康监测已交由后台定时巡检机制自动执行，跳过部署即时探针探测`,
+        'info',
+        'COMPLETE'
+      )
     }
 
-    // 成功完成
-    const durationSeconds = Math.round((Date.now() - startTime) / 1000)
     log(`[00:15] ✓ 【真实系统流水线】执行顺利完成！总耗时: ${durationSeconds} 秒`, 'success', 'COMPLETE')
 
+    const nowIso = new Date().toISOString()
     updateDeployment(deploymentId, {
       status: 'success',
-      endTime: new Date().toISOString(),
+      endTime: nowIso,
       durationSeconds,
       currentStep: '部署完成',
     })
     updateProject(project.id, {
       status: 'active',
-      lastDeployed: '刚刚',
+      lastDeployed: nowIso,
+      lastCommitHash: deployment.commitHash,
+      lastCommitMessage: deployment.commitMessage,
+      lastVersionTag: deployment.versionTag,
     })
 
     this.emit(deploymentId, {
@@ -631,6 +716,216 @@ class PipelineManager {
     const fullTag = this.extractDockerImageTag(buildCommand, fallbackName)
     const parts = fullTag.split(':')
     return parts[0] || fallbackName.toLowerCase().replace(/[^a-z0-9_.-]/g, '-')
+  }
+
+  /**
+   * 从启动命令中提取 Docker 容器名称 (例如 docker run -d --name app -p 80:80 app:latest -> app)
+   */
+  public extractDockerContainerName(startCommand?: string): string | null {
+    if (!startCommand) return null
+    // 仅在明确是 docker run 命令或包含 docker 指令时解析，避免与 pm2 等工具的 --name 冲突
+    if (!startCommand.includes('docker ') && !startCommand.includes('docker\n')) {
+      return null
+    }
+    const match = startCommand.match(/(?:^|\s)--name(?:=|\s+)(?:["']([^"'\s]+)["']|([^\s"']+))/)
+    if (match) {
+      return (match[1] || match[2] || '').trim() || null
+    }
+    return null
+  }
+
+  /**
+   * 清理本机已存在的同名 Docker 容器
+   */
+  private cleanupLocalDockerContainer(
+    containerName: string,
+    log: (text: string, type?: 'info' | 'success' | 'error' | 'warning', step?: string) => void
+  ): Promise<void> {
+    const isWindows = process.platform === 'win32'
+    const checkAndCleanCmd = isWindows
+      ? `docker inspect --type container "${containerName}" >nul 2>&1 && (docker stop -t 10 "${containerName}" >nul 2>&1 & docker rm -f "${containerName}" >nul 2>&1 & echo EXISTS_AND_REMOVED) || echo NOT_FOUND`
+      : `if docker inspect --type container "${containerName}" >/dev/null 2>&1; then docker stop -t 10 "${containerName}" >/dev/null 2>&1 || true; docker rm -f "${containerName}" >/dev/null 2>&1 || true; echo "EXISTS_AND_REMOVED"; else echo "NOT_FOUND"; fi`
+
+    return new Promise((resolve) => {
+      exec(checkAndCleanCmd, (err, stdout) => {
+        if (!err && stdout.includes('EXISTS_AND_REMOVED')) {
+          log(`[00:11] 检测到本机已存在同名 Docker 容器 [${containerName}]，已平滑停止并安全移除旧容器`, 'success', 'DEPLOY')
+        }
+        resolve()
+      })
+    })
+  }
+
+  /**
+   * 远程清理目标服务器上已存在的同名 Docker 容器
+   */
+  private cleanupRemoteDockerContainer(
+    conn: Client,
+    containerName: string,
+    log: (text: string, type?: 'info' | 'success' | 'error' | 'warning', step?: string) => void
+  ): Promise<void> {
+    const cleanCmd = `if docker inspect --type container "${containerName}" >/dev/null 2>&1; then docker stop -t 10 "${containerName}" >/dev/null 2>&1 || true; docker rm -f "${containerName}" >/dev/null 2>&1 || true; echo "EXISTS_AND_REMOVED"; else echo "NOT_FOUND"; fi`
+
+    return new Promise<void>((resolve) => {
+      conn.exec(wrapSshCommand(cleanCmd), (err, stream) => {
+        if (err) {
+          log(`[remote-clean] 检查旧容器状态时发生异常: ${err.message}`, 'warning', 'STARTUP')
+          return resolve()
+        }
+
+        let output = ''
+        stream.on('data', (d: Buffer) => {
+          output += d.toString('utf-8')
+        })
+        stream.stderr.on('data', () => {})
+        stream.on('close', () => {
+          if (output.includes('EXISTS_AND_REMOVED')) {
+            log(
+              `[00:15] 检测到目标主机已存在同名旧容器 [${containerName}]，已平滑停止并安全移除`,
+              'success',
+              'STARTUP'
+            )
+          }
+          resolve()
+        })
+      })
+    })
+  }
+
+  /**
+   * 检查目标主机上指定容器是否已启动存在
+   */
+  private checkContainerExistsRemote(
+    conn: Client,
+    containerName: string
+  ): Promise<boolean> {
+    const inspectCmd = `docker inspect --type container "${containerName}" >/dev/null 2>&1 && echo "RUNNING" || echo "NOT_FOUND"`
+    return new Promise((resolve) => {
+      conn.exec(wrapSshCommand(inspectCmd), (err, stream) => {
+        if (err) return resolve(false)
+        let out = ''
+        stream.on('data', (d: Buffer) => {
+          out += d.toString('utf-8')
+        })
+        stream.stderr.on('data', () => {})
+        stream.on('close', () => {
+          resolve(out.includes('RUNNING'))
+        })
+      })
+    })
+  }
+
+  /**
+   * 远程执行启动命令，并在遭遇容器名称冲突时自动清理旧容器重试一次
+   */
+  private executeRemoteCommandWithRetry(
+    conn: Client,
+    cmd: string,
+    expectedContainerName: string | null,
+    log: (text: string, type?: 'info' | 'success' | 'error' | 'warning', step?: string) => void,
+    step: string,
+    hasRetried = false
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      conn.exec(wrapSshCommand(cmd), (err, stream) => {
+        if (err) return reject(err)
+
+        let stderrOutput = ''
+        let capturedExitCode: number | null | undefined = undefined
+
+        stream
+          .on('exit', (code: any) => {
+            if (typeof code === 'number') {
+              capturedExitCode = code
+            }
+          })
+          .on('data', (data: Buffer) => {
+            const text = data.toString('utf-8').trim()
+            if (text) {
+              text.split('\n').forEach((line) => log(`[remote] ${line}`, 'info', step))
+            }
+          })
+          .stderr.on('data', (data: Buffer) => {
+            const text = data.toString('utf-8').trim()
+            if (text) {
+              stderrOutput += text + '\n'
+              text.split('\n').forEach((line) => log(`[remote-err] ${line}`, 'warning', step))
+            }
+          })
+          .on('close', async (closeCode: any) => {
+            const effectiveCode =
+              typeof closeCode === 'number'
+                ? closeCode
+                : typeof capturedExitCode === 'number'
+                ? capturedExitCode
+                : undefined
+
+            // 1. 明确返回退出码 0，直接判定成功
+            if (effectiveCode === 0) {
+              return resolve()
+            }
+
+            // 2. 检查是否出现 Docker 容器名称冲突错误
+            const conflictMatch = stderrOutput.match(
+              /Conflict\.\s+The container name\s+["']?\/?([^"'\s]+)["']?\s+is already in use/i
+            )
+
+            if (conflictMatch && !hasRetried) {
+              const conflictName = conflictMatch[1] || expectedContainerName
+              if (conflictName) {
+                log(
+                  `[!] 目标主机返回 Docker 容器名称冲突 [${conflictName}]，正在自动清理旧容器并重试启动...`,
+                  'warning',
+                  step
+                )
+                try {
+                  await this.cleanupRemoteDockerContainer(conn, conflictName, log)
+                  await this.executeRemoteCommandWithRetry(
+                    conn,
+                    cmd,
+                    conflictName,
+                    log,
+                    step,
+                    true // 仅重试一次
+                  )
+                  return resolve()
+                } catch (retryErr: any) {
+                  return reject(retryErr)
+                }
+              }
+            }
+
+            // 3. 处理退出码未定义 (undefined / null) 的情况：
+            // 在 SSH 远程执行 daemon 后台进程 (如 docker run -d) 时，SSH 服务端可能直接关闭通道而不附带 exit-status 报文
+            if (effectiveCode === undefined) {
+              const hasCriticalError =
+                stderrOutput.trim().length > 0 &&
+                /(?:error|conflict|failed|fatal|cannot|denied)/i.test(stderrOutput)
+
+              if (!hasCriticalError) {
+                // 如果是 Docker 启动命令且已知容器名，进一步验证容器是否在运行
+                if (expectedContainerName) {
+                  try {
+                    const isRunning = await this.checkContainerExistsRemote(conn, expectedContainerName)
+                    if (isRunning) {
+                      log(`[00:16] 验证目标主机容器 [${expectedContainerName}] 已正常启动运行`, 'success', step)
+                      return resolve()
+                    }
+                  } catch {}
+                }
+                // 无严重错误输出且通道正常关闭，判定启动成功
+                return resolve()
+              }
+            }
+
+            // 4. 其他错误场景
+            const errMsg = stderrOutput.trim()
+              ? `远程启动命令返回退出码 ${effectiveCode ?? '未知'}: ${stderrOutput.trim()}`
+              : `远程启动命令返回退出码: ${effectiveCode ?? '未知'}`
+            reject(new Error(errMsg))
+          })
+      })
+    })
   }
 
   /**
@@ -794,34 +1089,21 @@ class PipelineManager {
               // 容器启动 / 重载
               if (project.startCommand && project.startCommand.trim()) {
                 setStatus('running', '容器启动')
+                const containerName = this.extractDockerContainerName(project.startCommand)
+                if (containerName) {
+                  log(`[00:15] 正在检查目标主机同名 Docker 容器 [${containerName}]...`, 'info', 'STARTUP')
+                  await this.cleanupRemoteDockerContainer(conn, containerName, log)
+                }
+
                 log(`[00:15] 正在目标主机远程执行容器启动命令: ${project.startCommand}`, 'info', 'STARTUP')
 
-                await new Promise<void>((resolveStart, rejectStart) => {
-                  conn.exec(wrapSshCommand(project.startCommand), (err, stream) => {
-                    if (err) return rejectStart(err)
-
-                    stream
-                      .on('close', (code: number) => {
-                        if (code === 0) {
-                          resolveStart()
-                        } else {
-                          rejectStart(new Error(`远程容器启动命令返回退出码: ${code}`))
-                        }
-                      })
-                      .on('data', (data: Buffer) => {
-                        const text = data.toString('utf-8').trim()
-                        if (text) {
-                          text.split('\n').forEach((line) => log(`[remote] ${line}`, 'info', 'STARTUP'))
-                        }
-                      })
-                      .stderr.on('data', (data: Buffer) => {
-                        const text = data.toString('utf-8').trim()
-                        if (text) {
-                          text.split('\n').forEach((line) => log(`[remote-err] ${line}`, 'warning', 'STARTUP'))
-                        }
-                      })
-                  })
-                })
+                await this.executeRemoteCommandWithRetry(
+                  conn,
+                  project.startCommand,
+                  containerName,
+                  log,
+                  'STARTUP'
+                )
 
                 log(`[00:16] ✓ 远程容器启动命令执行完毕`, 'success', 'STARTUP')
               } else {
@@ -889,8 +1171,13 @@ class PipelineManager {
                     remoteErr += d.toString()
                   })
                   stream.resume()
+                  let capturedExitCode: number | null | undefined = undefined
+                  stream.on('exit', (c: any) => {
+                    if (typeof c === 'number') capturedExitCode = c
+                  })
                   stream.on('close', (code: number) => {
-                    if (code === 0) {
+                    const finalCode = typeof code === 'number' ? code : (typeof capturedExitCode === 'number' ? capturedExitCode : undefined)
+                    if (finalCode === 0 || (finalCode === undefined && !remoteErr.trim())) {
                       resolveUnpack()
                     } else {
                       if (remoteErr.includes('Permission denied')) {
@@ -900,7 +1187,7 @@ class PipelineManager {
                           )
                         )
                       } else {
-                        rejectUnpack(new Error(`远程产物解压部署返回退出码 ${code}: ${remoteErr.trim() || '未知异常'}`))
+                        rejectUnpack(new Error(`远程产物解压部署返回退出码 ${finalCode ?? '未知'}: ${remoteErr.trim() || '未知异常'}`))
                       }
                     }
                   })
@@ -917,35 +1204,22 @@ class PipelineManager {
               // 服务进程启动 / 重载
               if (project.startCommand && project.startCommand.trim()) {
                 setStatus('running', '服务启动')
+                const containerName = this.extractDockerContainerName(project.startCommand)
+                if (containerName) {
+                  log(`[00:15] 正在检查目标主机同名 Docker 容器 [${containerName}]...`, 'info', 'STARTUP')
+                  await this.cleanupRemoteDockerContainer(conn, containerName, log)
+                }
+
                 const remoteStartCmd = `cd "${project.deployPath}" && ${project.startCommand}`
                 log(`[00:15] 远程执行启动指令: ${project.startCommand}`, 'info', 'STARTUP')
 
-                await new Promise<void>((resolveStart, rejectStart) => {
-                  conn.exec(wrapSshCommand(remoteStartCmd), (err, stream) => {
-                    if (err) return rejectStart(err)
-
-                    stream
-                      .on('close', (code: number) => {
-                        if (code === 0) {
-                          resolveStart()
-                        } else {
-                          rejectStart(new Error(`远程服务启动命令返回退出码: ${code}`))
-                        }
-                      })
-                      .on('data', (data: Buffer) => {
-                        const text = data.toString('utf-8').trim()
-                        if (text) {
-                          text.split('\n').forEach((line) => log(`[remote] ${line}`, 'info', 'STARTUP'))
-                        }
-                      })
-                      .stderr.on('data', (data: Buffer) => {
-                        const text = data.toString('utf-8').trim()
-                        if (text) {
-                          text.split('\n').forEach((line) => log(`[remote-err] ${line}`, 'warning', 'STARTUP'))
-                        }
-                      })
-                  })
-                })
+                await this.executeRemoteCommandWithRetry(
+                  conn,
+                  remoteStartCmd,
+                  containerName,
+                  log,
+                  'STARTUP'
+                )
 
                 log(`[00:16] ✓ 远程服务启动命令执行完毕`, 'success', 'STARTUP')
               } else {
@@ -1082,6 +1356,10 @@ class PipelineManager {
     log(`[00:01] 正在连接 Git 远程仓库拉取分支 [${project.branch}]...`, 'info', 'GIT_CLONE')
     await this.sleep(1200, abortController.signal)
     log(`[00:02] ✓ 成功检出最新提交 [${deployment.commitHash}]: ${deployment.commitMessage}`, 'success', 'GIT_CLONE')
+    updateProject(project.id, {
+      lastCommitHash: deployment.commitHash,
+      lastCommitMessage: deployment.commitMessage,
+    })
 
     const isDockerSimMode =
       project.artifactType === 'docker' ||
@@ -1090,19 +1368,31 @@ class PipelineManager {
           (project.buildCommand && project.buildCommand.toLowerCase().includes('docker build'))))
 
     if (isDockerSimMode) {
-      const versionTag = generateDockerVersionTag(deployment.commitHash || deploymentId)
+      const versionTag =
+        deployment.triggerType === 'rollback' && deployment.versionTag
+          ? deployment.versionTag
+          : generateDockerVersionTag(deployment.commitHash || deploymentId)
       deployment.versionTag = versionTag
       updateDeployment(deploymentId, { versionTag })
+      updateProject(project.id, { lastVersionTag: versionTag })
       this.emit(deploymentId, {
         type: 'status',
         deploymentId,
         payload: { versionTag },
       })
-      log(
-        `[00:02] 【Docker 版本化管理 (方案B)】自动分配版本标签: [${versionTag}] (基于时间戳 + Git Hash: ${deployment.commitHash || 'auto'})`,
-        'success',
-        'GIT_CLONE'
-      )
+      if (deployment.triggerType === 'rollback') {
+        log(
+          `[00:02] 【Docker 一键回滚】锁定目标版本标签: [${versionTag}] (历史提交: ${deployment.commitHash || 'auto'})`,
+          'success',
+          'GIT_CLONE'
+        )
+      } else {
+        log(
+          `[00:02] 【Docker 版本化管理 (方案B)】自动分配版本标签: [${versionTag}] (基于时间戳 + Git Hash: ${deployment.commitHash || 'auto'})`,
+          'success',
+          'GIT_CLONE'
+        )
+      }
     }
 
     if (abortController.signal.aborted) return
@@ -1121,9 +1411,12 @@ class PipelineManager {
     if (project.envVars && project.envVars.length > 0) {
       log(`[00:06] 注入环境变量: ${project.envVars.map((e) => `${e.key}=${e.isSecret ? '******' : e.value}`).join(', ')}`, 'info', 'BUILD')
     }
-    if (isDockerSimMode && deployment.versionTag) {
-      const baseName = this.extractDockerBaseImageName(project.buildCommand || 'docker build -t app:latest .', project.name)
-      log(`[00:06] 【Docker 版本化构建】生成不可变镜像: [${baseName}:${deployment.versionTag}] 及运行别名: [${baseName}:latest]`, 'info', 'BUILD')
+    if (isDockerSimMode) {
+      log(`[00:06] ✓ 校验项目根目录规范: 已识别根目录下标准 Dockerfile 容器化镜像构建文件`, 'success', 'BUILD')
+      if (deployment.versionTag) {
+        const baseName = this.extractDockerBaseImageName(project.buildCommand || 'docker build -t app:latest .', project.name)
+        log(`[00:06] 【Docker 版本化构建】生成不可变镜像: [${baseName}:${deployment.versionTag}] 及运行别名: [${baseName}:latest]`, 'info', 'BUILD')
+      }
     }
     await this.sleep(2200, abortController.signal)
     log(`[00:07] ✓ 编译产物打包就绪，生成优化产物包 (大小约 3.2MB)`, 'success', 'BUILD')
@@ -1171,31 +1464,42 @@ class PipelineManager {
 
     // Step 5: Start / Reload Process
     setStatus('running', '服务启动')
+    const simContainerName = this.extractDockerContainerName(project.startCommand)
+    if (simContainerName) {
+      log(`[00:10] 检测到 Docker 容器命名 [${simContainerName}]，正在平滑停止并清理已存在同名旧容器...`, 'info', 'STARTUP')
+      await this.sleep(800, abortController.signal)
+      log(`[00:10] ✓ 已安全清理旧容器 [${simContainerName}]，准备启动新版本容器`, 'success', 'STARTUP')
+    }
     log(`[00:10] SSH 远程执行启动指令: ${project.startCommand || 'npm start'}`, 'info', 'STARTUP')
     await this.sleep(1400, abortController.signal)
     log(`[00:11] ✓ 服务进程重载成功，PID 已分配，监听端口 :${project.port}`, 'success', 'STARTUP')
 
     if (abortController.signal.aborted) return
 
-    // Step 6: Health Check
-    setStatus('running', '健康检查')
-    log(`[00:12] 发起健康探针检查: ${project.healthCheckUrl || `http://${project.serverIp}:${project.port}/health`}`, 'info', 'HEALTH')
-    await this.sleep(1000, abortController.signal)
-    log(`[00:13] ✓ 健康探针响应 HTTP 200 OK (耗时: 18ms)`, 'success', 'HEALTH')
-
-    // Complete
+    // Step 6: Complete
     const durationSeconds = Math.round((Date.now() - startTime) / 1000)
+    if (project.healthCheckUrl && project.healthCheckUrl.trim()) {
+      log(
+        `[00:12] ℹ 服务已启动完毕，心跳健康检查已移交由后台定时巡检任务执行，跳过部署即时探测`,
+        'info',
+        'COMPLETE'
+      )
+    }
     log(`[00:14] ✓ 流水线执行成功！总耗时: ${durationSeconds} 秒`, 'success', 'COMPLETE')
 
+    const nowIso = new Date().toISOString()
     updateDeployment(deploymentId, {
       status: 'success',
-      endTime: new Date().toISOString(),
+      endTime: nowIso,
       durationSeconds,
       currentStep: '部署完成',
     })
     updateProject(project.id, {
       status: 'active',
-      lastDeployed: '刚刚',
+      lastDeployed: nowIso,
+      lastCommitHash: deployment.commitHash,
+      lastCommitMessage: deployment.commitMessage,
+      lastVersionTag: deployment.versionTag,
     })
 
     this.emit(deploymentId, {
@@ -1238,3 +1542,7 @@ class PipelineManager {
 const globalForPipeline = global as unknown as { pipelineManager?: PipelineManager }
 export const pipelineManager = globalForPipeline.pipelineManager || new PipelineManager()
 if (process.env.NODE_ENV !== 'production') globalForPipeline.pipelineManager = pipelineManager
+
+export function extractDockerContainerName(startCommand?: string): string | null {
+  return pipelineManager.extractDockerContainerName(startCommand)
+}

@@ -87,10 +87,10 @@ export async function POST(
         }
       }
     }
-
+    const nowIso = new Date().toISOString()
     const updated = updateServer(id, {
       status: isOnline ? 'online' : 'offline',
-      lastChecked: '刚刚',
+      lastChecked: nowIso,
       latencyMs: latency,
     })
 

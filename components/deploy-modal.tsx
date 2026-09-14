@@ -15,8 +15,11 @@ import {
   ChevronDown,
   GitCommit,
   Tag,
+  Boxes,
+  Sparkles,
 } from 'lucide-react'
 import { DeployLogEntry, DeploymentStatus } from '@/lib/types'
+import { DockerfileGuideModal } from '@/components/dockerfile-guide-modal'
 
 interface DeployModalProps {
   deploymentId: string
@@ -41,6 +44,7 @@ export function DeployModal({
   const [copied, setCopied] = useState(false)
   const [autoScroll, setAutoScroll] = useState(true)
   const [cancelling, setCancelling] = useState(false)
+  const [showDockerfileModal, setShowDockerfileModal] = useState(false)
 
   const terminalEndRef = useRef<HTMLDivElement>(null)
 
@@ -254,6 +258,28 @@ export function DeployModal({
           </div>
         </div>
 
+        {/* Dockerfile Tip Banner if relevant */}
+        {logs.some((l) => l.text.toLowerCase().includes('dockerfile')) && (
+          <div className="mx-4 mt-3 p-2.5 rounded-lg bg-blue-500/10 border border-blue-500/30 flex items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2 text-blue-300">
+              <Boxes className="size-4 shrink-0 text-blue-400" />
+              <span>
+                检测到 Docker 容器化构建日志。如需获取项目 Dockerfile 模板或放置规范：
+              </span>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              onClick={() => setShowDockerfileModal(true)}
+              className="text-xs text-blue-300 border-blue-500/30 hover:bg-blue-500/20 shrink-0"
+            >
+              <Sparkles className="size-3 mr-1" />
+              查看 Dockerfile 模板与放置指引
+            </Button>
+          </div>
+        )}
+
         {/* Terminal Output */}
         <div className="flex-1 overflow-hidden flex flex-col bg-black/85 m-4 rounded-xl border border-border shadow-inner">
           {/* Terminal Window Bar */}
@@ -357,6 +383,13 @@ export function DeployModal({
           </div>
         </div>
       </div>
+
+      {showDockerfileModal && (
+        <DockerfileGuideModal
+          isOpen={showDockerfileModal}
+          onClose={() => setShowDockerfileModal(false)}
+        />
+      )}
     </div>
   )
 }

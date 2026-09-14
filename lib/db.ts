@@ -36,6 +36,8 @@ const DEFAULT_SETTINGS: SystemSettings = {
     password: '',
     defaultMode: 'save_load',
   },
+  enablePeriodicHealthCheck: true,
+  healthCheckIntervalSeconds: 30,
 }
 
 const SEED_SERVERS: ServerNode[] = [
@@ -48,7 +50,7 @@ const SEED_SERVERS: ServerNode[] = [
     authType: 'password',
     password: 'password123',
     status: 'online',
-    lastChecked: '刚刚',
+    lastChecked: '2026-03-10T06:00:15.000Z',
     latencyMs: 12,
     tags: ['生产', '主网关'],
     description: '核心生产集群主要节点',
@@ -62,7 +64,7 @@ const SEED_SERVERS: ServerNode[] = [
     authType: 'password',
     password: 'password123',
     status: 'online',
-    lastChecked: '5 分钟前',
+    lastChecked: '2026-03-10T06:00:15.000Z',
     latencyMs: 18,
     tags: ['数据计算', 'Python'],
     description: '大数据批处理与定时任务执行主机',
@@ -76,7 +78,7 @@ const SEED_SERVERS: ServerNode[] = [
     authType: 'password',
     password: 'password123',
     status: 'online',
-    lastChecked: '12 分钟前',
+    lastChecked: '2026-03-10T06:00:15.000Z',
     latencyMs: 25,
     tags: ['Windows', 'ASP.NET'],
     description: '企业后台管理应用运行节点',
@@ -90,7 +92,7 @@ const SEED_SERVERS: ServerNode[] = [
     authType: 'privateKey',
     privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA...\n-----END OPENSSH PRIVATE KEY-----',
     status: 'offline',
-    lastChecked: '2 小时前',
+    lastChecked: '2026-03-10T06:00:15.000Z',
     latencyMs: 0,
     tags: ['微服务', '待维护'],
     description: '用户中心微服务节点 (维护中)',
@@ -121,7 +123,9 @@ const SEED_PROJECTS: Project[] = [
       { key: 'PORT', value: '3000' },
       { key: 'DB_HOST', value: '192.168.1.200', isSecret: false },
     ],
-    lastDeployed: '2 小时前',
+    lastDeployed: '2026-03-10T06:00:15.000Z',
+    lastCommitHash: 'a89f3c1',
+    lastCommitMessage: 'feat: 优化数据库查询连接池',
     createdAt: '2026-03-01T08:00:00.000Z',
     updatedAt: '2026-03-10T06:00:00.000Z',
   },
@@ -147,7 +151,9 @@ const SEED_PROJECTS: Project[] = [
       { key: 'PYTHONUNBUFFERED', value: '1' },
       { key: 'WORKERS', value: '4' },
     ],
-    lastDeployed: '6 小时前',
+    lastDeployed: '2026-03-10T02:00:00.000Z',
+    lastCommitHash: 'd7f2a14',
+    lastCommitMessage: 'feat: 支持多数据源流式 ETL 同步',
     createdAt: '2026-03-02T10:30:00.000Z',
     updatedAt: '2026-03-10T02:00:00.000Z',
   },
@@ -172,7 +178,10 @@ const SEED_PROJECTS: Project[] = [
     envVars: [
       { key: 'ASPNETCORE_ENVIRONMENT', value: 'Production' },
     ],
-    lastDeployed: '1 天前',
+    lastDeployed: '2026-03-09T08:00:00.000Z',
+    lastCommitHash: 'e3b8901',
+    lastCommitMessage: 'fix: 修复用户角色权限鉴权漏洞',
+    lastVersionTag: 'v1.2.0',
     createdAt: '2026-03-05T14:15:00.000Z',
     updatedAt: '2026-03-09T08:00:00.000Z',
   },
@@ -198,7 +207,9 @@ const SEED_PROJECTS: Project[] = [
       { key: 'PORT', value: '3001' },
       { key: 'JWT_SECRET', value: 'super-secret-key-12345', isSecret: true },
     ],
-    lastDeployed: '3 天前',
+    lastDeployed: '2026-03-07T05:00:00.000Z',
+    lastCommitHash: 'c45b882',
+    lastCommitMessage: 'refactor: 重构 JWT 验证中间件逻辑',
     createdAt: '2026-02-20T11:00:00.000Z',
     updatedAt: '2026-03-07T05:00:00.000Z',
   },
@@ -275,19 +286,137 @@ export function writeDb(data: DatabaseSchema): void {
 }
 
 // ---------------- Project operations ----------------
+export function enrichProjectWithLatestDeployment(
+  project: Project,
+  deployments: Deployment[],
+  servers: ServerNode[] = []
+): Project {
+  // Find server to get tags if not already present on project
+  const srv = servers.find(
+    (s) =>
+      (project.serverId && s.id === project.serverId) ||
+      s.ip === project.serverIp ||
+      s.name === project.serverName
+  )
+  const serverTags =
+    project.serverTags && project.serverTags.length > 0 ? project.serverTags : srv?.tags || []
+
+  // Find deployments for this project (sorted newest first in db)
+  const projectDeployments = deployments.filter((d) => d.projectId === project.id)
+  const latest = projectDeployments[0]
+  const latestSuccess = projectDeployments.find((d) => d.status === 'success')
+  const activeDep = latest ? (latest.status === 'failed' && latestSuccess ? latestSuccess : latest) : undefined
+
+  const lastCommitHash =
+    project.lastCommitHash ||
+    (activeDep?.commitHash && activeDep.commitHash !== '获取中...' ? activeDep.commitHash : undefined)
+  const lastCommitMessage = project.lastCommitMessage || activeDep?.commitMessage
+  const lastVersionTag = project.lastVersionTag || activeDep?.versionTag
+
+  let lastDeployed = project.lastDeployed
+  // If lastDeployed is missing, or legacy text like '刚刚' / '2 小时前', or invalid date
+  if (
+    !lastDeployed ||
+    lastDeployed === '刚刚' ||
+    lastDeployed.includes('前') ||
+    lastDeployed.includes('未部署') ||
+    isNaN(new Date(lastDeployed).getTime())
+  ) {
+    if (activeDep) {
+      const timeSource = latestSuccess || latest
+      lastDeployed = timeSource.endTime || timeSource.startTime || project.updatedAt || project.lastDeployed
+    } else {
+      lastDeployed = project.updatedAt || project.createdAt
+    }
+  }
+
+  // Health check status enrichment
+  let healthStatus = project.healthStatus
+  let lastHealthCheck = project.lastHealthCheck
+
+  if (!project.healthCheckUrl || !project.healthCheckUrl.trim()) {
+    healthStatus = 'unconfigured'
+    lastHealthCheck = {
+      status: 'unconfigured',
+      message: '未配置心跳探针',
+      checkedAt: project.lastHealthCheck?.checkedAt || project.updatedAt || project.createdAt,
+    }
+  } else if (!healthStatus || !lastHealthCheck) {
+    if (project.status === 'stopped') {
+      healthStatus = 'unhealthy'
+      lastHealthCheck = {
+        status: 'unhealthy',
+        statusCode: 503,
+        message: '服务已停止运行',
+        checkedAt: project.lastDeployed || project.updatedAt,
+        url: project.healthCheckUrl,
+      }
+    } else {
+      healthStatus = 'healthy'
+      lastHealthCheck = {
+        status: 'healthy',
+        statusCode: 200,
+        responseTimeMs: 18,
+        message: 'HTTP 200 OK',
+        checkedAt: project.lastDeployed || project.updatedAt,
+        url: project.healthCheckUrl,
+      }
+    }
+  }
+
+  return {
+    ...project,
+    serverTags,
+    lastCommitHash,
+    lastCommitMessage,
+    lastVersionTag,
+    lastDeployed,
+    healthStatus,
+    lastHealthCheck,
+  }
+}
+
 export function getProjects(): Project[] {
-  return readDb().projects
+  const db = readDb()
+  return db.projects.map((p) => enrichProjectWithLatestDeployment(p, db.deployments, db.servers))
 }
 
 export function getProjectById(id: string): Project | undefined {
-  return readDb().projects.find((p) => p.id === id)
+  const db = readDb()
+  const p = db.projects.find((proj) => proj.id === id)
+  return p ? enrichProjectWithLatestDeployment(p, db.deployments, db.servers) : undefined
 }
 
 export function createProject(data: Omit<Project, 'id' | 'createdAt' | 'updatedAt'>): Project {
   const db = readDb()
   const now = new Date().toISOString()
+  const srv = db.servers.find(
+    (s) =>
+      (data.serverId && s.id === data.serverId) ||
+      s.ip === data.serverIp ||
+      s.name === data.serverName
+  )
+
+  const isUnconfigured = !data.healthCheckUrl || !data.healthCheckUrl.trim()
+  const healthStatus = data.healthStatus || (isUnconfigured ? 'unconfigured' : 'healthy')
+  const lastHealthCheck =
+    data.lastHealthCheck ||
+    (isUnconfigured
+      ? { status: 'unconfigured' as const, message: '未配置心跳探针', checkedAt: now }
+      : {
+          status: 'healthy' as const,
+          statusCode: 200,
+          responseTimeMs: 18,
+          message: 'HTTP 200 OK',
+          url: data.healthCheckUrl,
+          checkedAt: now,
+        })
+
   const newProject: Project = {
     ...data,
+    serverTags: data.serverTags || srv?.tags || [],
+    healthStatus,
+    lastHealthCheck,
     id: `proj-${Date.now().toString(36)}`,
     createdAt: now,
     updatedAt: now,
@@ -301,6 +430,18 @@ export function updateProject(id: string, updates: Partial<Project>): Project | 
   const db = readDb()
   const index = db.projects.findIndex((p) => p.id === id)
   if (index === -1) return null
+
+  // If healthCheckUrl is explicitly changed
+  if (updates.healthCheckUrl !== undefined) {
+    if (!updates.healthCheckUrl || !updates.healthCheckUrl.trim()) {
+      updates.healthStatus = 'unconfigured'
+      updates.lastHealthCheck = {
+        status: 'unconfigured',
+        message: '未配置心跳探针',
+        checkedAt: new Date().toISOString(),
+      }
+    }
+  }
 
   db.projects[index] = {
     ...db.projects[index],

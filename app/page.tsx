@@ -190,6 +190,12 @@ export default function Page() {
               onDeploy={(id) => handleDeploy(id)}
               onViewDetails={(p) => setActiveDetailProject(p)}
               onDeleteProject={handleDeleteProject}
+              onProjectUpdated={(updatedProject) => {
+                setProjects((prev) =>
+                  prev.map((p) => (p.id === updatedProject.id ? updatedProject : p))
+                )
+              }}
+              onRefreshProjects={loadData}
             />
           </div>
         )}
