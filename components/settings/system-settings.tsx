@@ -15,6 +15,10 @@ import {
   Eye,
   EyeOff,
   Activity,
+  Archive,
+  Trash2,
+  RefreshCw,
+  AlertCircle,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -22,7 +26,7 @@ import { SystemSettings as SettingsType, DockerRegistryConfig } from '@/lib/type
 
 export function SystemSettings() {
   const [settings, setSettings] = useState<SettingsType>({
-    platformName: '轻量自研 CI/CD 平台',
+    platformName: 'Solo Deck 平台',
     workspacePath: '',
     artifactPath: '',
     concurrencyLimit: 5,
@@ -40,6 +44,14 @@ export function SystemSettings() {
     },
     enablePeriodicHealthCheck: true,
     healthCheckIntervalSeconds: 30,
+    enableArtifactCleanup: true,
+    artifactRetentionDays: 7,
+    artifactMaxKeepPerProject: 5,
+    artifactCleanupIntervalHours: 24,
+    enableDockerImagePrune: true,
+    dockerPruneDanglingOnly: true,
+    dockerPruneRetentionHours: 72,
+    dockerPruneIntervalHours: 24,
   })
 
   const [loading, setLoading] = useState(true)
@@ -47,6 +59,35 @@ export function SystemSettings() {
   const [saved, setSaved] = useState(false)
   const [testSent, setTestSent] = useState(false)
   const [showRegPassword, setShowRegPassword] = useState(false)
+
+  // 产物与镜像清理相关状态
+  const [artifactStats, setArtifactStats] = useState<{
+    totalBytes: number
+    formattedSize: string
+    totalFiles: number
+    projectCount: number
+  } | null>(null)
+  const [loadingStats, setLoadingStats] = useState(false)
+  const [cleaningArtifacts, setCleaningArtifacts] = useState(false)
+  const [cleaningDocker, setCleaningDocker] = useState(false)
+  const [cleanupNotice, setCleanupNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
+
+  const loadCleanupStats = async () => {
+    try {
+      setLoadingStats(true)
+      const res = await fetch('/api/settings/cleanup')
+      if (res.ok) {
+        const data = await res.json()
+        if (data.stats) {
+          setArtifactStats(data.stats)
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load cleanup stats', err)
+    } finally {
+      setLoadingStats(false)
+    }
+  }
 
   useEffect(() => {
     fetch('/api/settings')
@@ -58,7 +99,60 @@ export function SystemSettings() {
       })
       .catch((err) => console.error('Failed to load settings', err))
       .finally(() => setLoading(false))
+
+    loadCleanupStats()
   }, [])
+
+  const handleManualCleanup = async (type: 'artifacts' | 'docker') => {
+    if (type === 'artifacts') setCleaningArtifacts(true)
+    if (type === 'docker') setCleaningDocker(true)
+    setCleanupNotice(null)
+
+    try {
+      const res = await fetch('/api/settings/cleanup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type }),
+      })
+      const data = await res.json()
+      if (res.ok && data.ok) {
+        if (data.stats) {
+          setArtifactStats(data.stats)
+        }
+        if (type === 'artifacts') {
+          const resArt = data.result?.artifacts
+          setCleanupNotice({
+            type: 'success',
+            message: `产物清理成功！已删除 ${resArt?.deletedFiles || 0} 个历史构建归档，释放磁盘空间 ${resArt?.reclaimedFormatted || '0 B'}。`,
+          })
+        } else {
+          const resDoc = data.result?.docker
+          setCleanupNotice({
+            type: 'success',
+            message: `Docker 镜像清理成功！已释放磁盘空间 ${resDoc?.reclaimedSpace || '0 B'}${resDoc?.deletedImagesCount ? `，删除镜像条目 ${resDoc.deletedImagesCount} 个` : ''}。`,
+          })
+        }
+      } else {
+        setCleanupNotice({
+          type: 'error',
+          message: data.error || '执行清理失败，请检查服务状态',
+        })
+      }
+    } catch (err: any) {
+      setCleanupNotice({
+        type: 'error',
+        message: '执行清理异常: ' + (err?.message || '未知错误'),
+      })
+    } finally {
+      setCleaningArtifacts(false)
+      setCleaningDocker(false)
+      // 重新拉取设置更新上次清理时间
+      fetch('/api/settings')
+        .then((r) => r.json())
+        .then((s) => setSettings((prev) => ({ ...prev, ...s })))
+        .catch(() => { })
+    }
+  }
 
   const handleSave = async () => {
     setSaving(true)
@@ -467,11 +561,10 @@ export function SystemSettings() {
                     },
                   })
                 }
-                className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${
-                  (settings.dockerRegistry?.defaultMode || 'save_load') === 'save_load'
-                    ? 'border-primary bg-primary/5'
-                    : 'border-border hover:border-primary/40'
-                }`}
+                className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${(settings.dockerRegistry?.defaultMode || 'save_load') === 'save_load'
+                  ? 'border-primary bg-primary/5'
+                  : 'border-border hover:border-primary/40'
+                  }`}
               >
                 <p className="text-xs font-semibold flex items-center gap-1.5">
                   <span className="size-2 rounded-full bg-blue-500" />
@@ -498,11 +591,10 @@ export function SystemSettings() {
                     },
                   })
                 }
-                className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${
-                  settings.dockerRegistry?.defaultMode === 'registry'
-                    ? 'border-primary bg-primary/5'
-                    : 'border-border hover:border-primary/40'
-                }`}
+                className={`p-3 rounded-lg border-2 cursor-pointer transition-all ${settings.dockerRegistry?.defaultMode === 'registry'
+                  ? 'border-primary bg-primary/5'
+                  : 'border-border hover:border-primary/40'
+                  }`}
               >
                 <p className="text-xs font-semibold flex items-center gap-1.5">
                   <span className="size-2 rounded-full bg-primary" />
@@ -517,7 +609,300 @@ export function SystemSettings() {
         </div>
       </div>
 
-      {/* 4. System Runtime Info */}
+      {/* 5. Storage & Artifacts Lifecycle Cleanup Configuration */}
+      <div className="rounded-xl border border-border bg-card p-5 space-y-5">
+        <div>
+          <h3 className="text-sm font-bold text-foreground flex items-center gap-2">
+            <Archive className="size-4 text-primary" />
+            存储空间与构建产物自动清理配置
+          </h3>
+          <p className="text-xs text-muted-foreground mt-1">
+            针对流水线构建归档目录（<code className="text-primary font-mono">{settings.artifactPath || '.cicd_artifacts'}</code>）及 Docker 镜像制定自动淘汰策略，防止持续部署占满宿主机磁盘。
+          </p>
+        </div>
+
+        {/* Global Notice Alert if present */}
+        {cleanupNotice && (
+          <div
+            className={`p-3 rounded-lg text-xs flex items-center justify-between gap-2 animate-in fade-in duration-200 ${cleanupNotice.type === 'success'
+              ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+              : 'bg-destructive/10 text-destructive border border-destructive/20'
+              }`}
+          >
+            <div className="flex items-center gap-2">
+              {cleanupNotice.type === 'success' ? (
+                <Check className="size-4 shrink-0 text-green-500" />
+              ) : (
+                <AlertCircle className="size-4 shrink-0 text-destructive" />
+              )}
+              <span>{cleanupNotice.message}</span>
+            </div>
+            <button
+              onClick={() => setCleanupNotice(null)}
+              className="text-muted-foreground hover:text-foreground text-xs"
+            >
+              关闭
+            </button>
+          </div>
+        )}
+
+        {/* Part A: .cicd_artifacts Lifecycle */}
+        <div className="p-4 rounded-lg border border-border/70 bg-muted/20 space-y-3.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <HardDrive className="size-4 text-blue-400" />
+              <h4 className="text-xs font-bold text-foreground">
+                .cicd_artifacts 本地产物归档生命周期管理
+              </h4>
+            </div>
+            <label className="flex items-center gap-2 text-xs font-medium text-foreground cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={settings.enableArtifactCleanup ?? true}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    enableArtifactCleanup: e.target.checked,
+                  })
+                }
+                className="rounded border-border size-4"
+              />
+              启用产物包定期自动清理
+            </label>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-md bg-background/50 border border-border/50 text-xs">
+            <div className="flex items-center gap-4">
+              <div>
+                <span className="text-muted-foreground text-[11px] block">当前归档总容量</span>
+                <span className="font-mono font-bold text-foreground text-sm mt-0.5 block">
+                  {artifactStats ? artifactStats.formattedSize : '计算中...'}
+                </span>
+              </div>
+              <div className="h-7 w-px bg-border/60" />
+              <div>
+                <span className="text-muted-foreground text-[11px] block">产物文件总数</span>
+                <span className="font-mono font-bold text-foreground text-sm mt-0.5 block">
+                  {artifactStats ? `${artifactStats.totalFiles} 个压缩包` : '0 个'}
+                </span>
+              </div>
+              <div className="h-7 w-px bg-border/60" />
+              <div>
+                <span className="text-muted-foreground text-[11px] block">上次清理时间</span>
+                <span className="text-muted-foreground font-mono text-[11px] mt-0.5 block">
+                  {settings.lastArtifactCleanupAt
+                    ? new Date(settings.lastArtifactCleanupAt).toLocaleString()
+                    : '未记录 / 尚未执行'}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={loadCleanupStats}
+                disabled={loadingStats}
+                className="h-7 text-xs gap-1"
+                title="重新统计产物大小"
+              >
+                <RefreshCw className={`size-3 ${loadingStats ? 'animate-spin' : ''}`} />
+                刷新统计
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleManualCleanup('artifacts')}
+                disabled={cleaningArtifacts}
+                className="h-7 text-xs gap-1 border-blue-500/30 hover:bg-blue-500/10 text-blue-400"
+              >
+                <Trash2 className={`size-3 ${cleaningArtifacts ? 'animate-spin' : ''}`} />
+                {cleaningArtifacts ? '正在清理产物...' : '立即清理过期产物'}
+              </Button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+            <div>
+              <label className="text-xs font-semibold text-muted-foreground">产物保留时长阈值</label>
+              <select
+                value={settings.artifactRetentionDays ?? 7}
+                disabled={settings.enableArtifactCleanup === false}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    artifactRetentionDays: Number(e.target.value),
+                  })
+                }
+                className="w-full mt-1 flex h-8 rounded-md border border-input bg-card px-2.5 py-1 text-xs shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+              >
+                <option value={3}>保留 3 天内构建产物</option>
+                <option value={7}>保留 7 天 (推荐默认)</option>
+                <option value={14}>保留 14 天 (2 周)</option>
+                <option value={30}>保留 30 天 (1 个月)</option>
+                <option value={60}>保留 60 天</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-muted-foreground">单项目最多保留历史版本数</label>
+              <select
+                value={settings.artifactMaxKeepPerProject ?? 5}
+                disabled={settings.enableArtifactCleanup === false}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    artifactMaxKeepPerProject: Number(e.target.value),
+                  })
+                }
+                className="w-full mt-1 flex h-8 rounded-md border border-input bg-card px-2.5 py-1 text-xs shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+              >
+                <option value={3}>最多保留最新 3 份</option>
+                <option value={5}>最多保留最新 5 份 (推荐)</option>
+                <option value={10}>最多保留最新 10 份</option>
+                <option value={20}>最多保留最新 20 份</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-muted-foreground">巡检清理周期</label>
+              <select
+                value={settings.artifactCleanupIntervalHours ?? 24}
+                disabled={settings.enableArtifactCleanup === false}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    artifactCleanupIntervalHours: Number(e.target.value),
+                  })
+                }
+                className="w-full mt-1 flex h-8 rounded-md border border-input bg-card px-2.5 py-1 text-xs shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+              >
+                <option value={6}>每 6 小时巡检一次</option>
+                <option value={12}>每 12 小时巡检一次</option>
+                <option value={24}>每 24 小时 (每天一次，推荐)</option>
+                <option value={48}>每 48 小时 (每两天一次)</option>
+                <option value={168}>每 7 天 (每周一次)</option>
+              </select>
+            </div>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            * 安全防护保护机制：清理引擎对每个项目始终强制保留至少 1 份最新的有效产物，避免因误设导致无法一键秒级回滚。
+          </p>
+        </div>
+
+        {/* Part B: Docker Image Pruning */}
+        <div className="p-4 rounded-lg border border-border/70 bg-muted/20 space-y-3.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Boxes className="size-4 text-amber-400" />
+              <h4 className="text-xs font-bold text-foreground">
+                Docker 镜像与构建缓存定时清理
+              </h4>
+            </div>
+            <label className="flex items-center gap-2 text-xs font-medium text-foreground cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={settings.enableDockerImagePrune ?? true}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    enableDockerImagePrune: e.target.checked,
+                  })
+                }
+                className="rounded border-border size-4"
+              />
+              启用 Docker 镜像定期自动清理
+            </label>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-md bg-background/50 border border-border/50 text-xs">
+            <div>
+              <span className="text-muted-foreground text-[11px] block">上次 Docker 清理时间</span>
+              <span className="text-muted-foreground font-mono text-[11px] mt-0.5 block">
+                {settings.lastDockerPruneAt
+                  ? new Date(settings.lastDockerPruneAt).toLocaleString()
+                  : '未记录 / 尚未执行'}
+              </span>
+            </div>
+
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleManualCleanup('docker')}
+              disabled={cleaningDocker}
+              className="h-7 text-xs gap-1 border-amber-500/30 hover:bg-amber-500/10 text-amber-400"
+            >
+              <Trash2 className={`size-3 ${cleaningDocker ? 'animate-spin' : ''}`} />
+              {cleaningDocker ? '正在清理镜像...' : '立即清理 Docker 镜像'}
+            </Button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+            <div>
+              <label className="text-xs font-semibold text-muted-foreground">清理范围策略</label>
+              <select
+                value={settings.dockerPruneDanglingOnly ? 'dangling' : 'all'}
+                disabled={settings.enableDockerImagePrune === false}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    dockerPruneDanglingOnly: e.target.value === 'dangling',
+                  })
+                }
+                className="w-full mt-1 flex h-8 rounded-md border border-input bg-card px-2.5 py-1 text-xs shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+              >
+                <option value="dangling">仅清理无标签悬空镜像 (&lt;none&gt;)</option>
+                <option value="all">深度清理：包含超过阈值未使用的镜像</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-muted-foreground">未使用镜像过期阈值</label>
+              <select
+                value={settings.dockerPruneRetentionHours ?? 72}
+                disabled={settings.enableDockerImagePrune === false || settings.dockerPruneDanglingOnly !== false}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    dockerPruneRetentionHours: Number(e.target.value),
+                  })
+                }
+                className="w-full mt-1 flex h-8 rounded-md border border-input bg-card px-2.5 py-1 text-xs shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+              >
+                <option value={24}>超过 24 小时 (1 天) 未使用</option>
+                <option value={72}>超过 72 小时 (3 天，推荐)</option>
+                <option value={168}>超过 168 小时 (7 天)</option>
+                <option value={720}>超过 720 小时 (30 天)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-muted-foreground">Docker 清理频率</label>
+              <select
+                value={settings.dockerPruneIntervalHours ?? 24}
+                disabled={settings.enableDockerImagePrune === false}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    dockerPruneIntervalHours: Number(e.target.value),
+                  })
+                }
+                className="w-full mt-1 flex h-8 rounded-md border border-input bg-card px-2.5 py-1 text-xs shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+              >
+                <option value={12}>每 12 小时清理一次</option>
+                <option value={24}>每 24 小时 (每天一次，推荐)</option>
+                <option value={48}>每 48 小时 (每两天一次)</option>
+                <option value={168}>每 7 天 (每周一次)</option>
+              </select>
+            </div>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            * 执行时通过系统的标准 <code className="font-mono text-primary">docker image prune</code> 指令回收本地镜像缓存，正在运行的容器镜像不会受任何影响。
+          </p>
+        </div>
+      </div>
+
+      {/* 6. System Runtime Info */}
       <div className="rounded-xl border border-border bg-card p-5 space-y-3">
         <h3 className="text-sm font-bold text-foreground flex items-center gap-2">
           <Info className="size-4 text-primary" />

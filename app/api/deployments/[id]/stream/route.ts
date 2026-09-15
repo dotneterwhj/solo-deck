@@ -47,6 +47,8 @@ export async function GET(
           status: deployment.status,
           currentStep: deployment.currentStep,
           durationSeconds: deployment.durationSeconds,
+          startTime: deployment.startTime,
+          endTime: deployment.endTime,
         },
       })
 
@@ -59,7 +61,10 @@ export async function GET(
         sendEvent({
           type: 'end',
           deploymentId: id,
-          payload: { status: deployment.status },
+          payload: {
+            status: deployment.status,
+            durationSeconds: deployment.durationSeconds,
+          },
         })
         controller.close()
         return

@@ -15,8 +15,8 @@ import {
   Tag,
 } from 'lucide-react'
 import { DashboardStats, Project, Deployment } from '@/lib/types'
-import { ProjectList } from './project-list'
-import { Button } from './ui/button'
+import { ProjectList } from '@/components/projects/project-list'
+import { Button } from '@/components/ui/button'
 
 interface DashboardOverviewProps {
   projects: Project[]
@@ -24,6 +24,7 @@ interface DashboardOverviewProps {
   onDeploy: (projectId: string) => void
   onViewDetails: (project: Project) => void
   onDeleteProject: (projectId: string) => void
+  onCloneProject?: (project: Project) => void
   onCreateProject: () => void
   onOpenDeploymentLog: (deploymentId: string) => void
 }
@@ -34,6 +35,7 @@ export function DashboardOverview({
   onDeploy,
   onViewDetails,
   onDeleteProject,
+  onCloneProject,
   onCreateProject,
   onOpenDeploymentLog,
 }: DashboardOverviewProps) {
@@ -223,6 +225,7 @@ export function DashboardOverview({
           onDeploy={onDeploy}
           onViewDetails={onViewDetails}
           onDeleteProject={onDeleteProject}
+          onCloneProject={onCloneProject}
         />
       </div>
     </div>

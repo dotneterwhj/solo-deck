@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -13,7 +13,6 @@ import {
   ShieldAlert,
   HardDrive,
   Boxes,
-  FolderArchive,
   FileCode,
   Sparkles,
   Copy,
@@ -26,9 +25,11 @@ import {
   Project,
   ArtifactType,
   DockerDeliveryMode,
+  DeployTargetMode,
 } from '@/lib/types'
-import { DockerfileGuideModal } from '@/components/dockerfile-guide-modal'
+import { DockerfileGuideModal } from '@/components/guides/dockerfile-guide-modal'
 import { DOCKERFILE_TEMPLATES, DockerfileTemplate } from '@/lib/dockerfile-templates'
+import { getAllRuntimes, getRuntime, IRuntimePlugin } from '@/lib/runtimes'
 
 type Step = 'basic' | 'git' | 'runtime' | 'server' | 'confirm'
 
@@ -40,6 +41,7 @@ interface WizardData {
   gitUsername: string
   gitToken: string
   runtime: RuntimeType | ''
+  deployTargetMode: DeployTargetMode
   installCommand: string
   buildCommand: string
   startCommand: string
@@ -58,71 +60,6 @@ interface NewProjectWizardProps {
   onClose: () => void
   onProjectCreated: (project: Project) => void
 }
-
-const RUNTIME_PRESETS: {
-  id: RuntimeType
-  name: string
-  desc: string
-  install: string
-  build: string
-  start: string
-  defaultPort: string
-}[] = [
-  {
-    id: 'Node.js',
-    name: 'Node.js',
-    desc: '适用于 Next.js, Express, NestJS, React, Vue 前后端应用',
-    install: 'pnpm install || npm install',
-    build: 'npm run build',
-    start: 'npm start',
-    defaultPort: '3000',
-  },
-  {
-    id: 'Python',
-    name: 'Python',
-    desc: '适用于 FastAPI, Flask, Django, 数据科学与算法任务',
-    install: 'pip install -r requirements.txt',
-    build: 'python setup.py build',
-    start: 'gunicorn -w 4 -b 0.0.0.0:5000 app:app --daemon',
-    defaultPort: '5000',
-  },
-  {
-    id: 'ASP.NET Core',
-    name: 'ASP.NET Core',
-    desc: '适用于 C# 企业级微服务与高性能 Web API',
-    install: 'dotnet restore',
-    build: 'dotnet publish -c Release -o ./publish',
-    start: 'dotnet ./publish/App.dll',
-    defaultPort: '8080',
-  },
-  {
-    id: 'Go',
-    name: 'Go',
-    desc: '适用于 Gin, Fiber, gRPC 高性能后端服务',
-    install: 'go mod download',
-    build: 'go build -o server .',
-    start: './server',
-    defaultPort: '8000',
-  },
-  {
-    id: 'Java',
-    name: 'Java (Spring Boot)',
-    desc: '适用于 Spring Boot / Cloud 企业级应用',
-    install: 'mvn clean compile',
-    build: 'mvn package -DskipTests',
-    start: 'java -jar target/app.jar',
-    defaultPort: '8080',
-  },
-  {
-    id: 'Docker',
-    name: 'Docker 容器',
-    desc: '使用 Dockerfile 容器化构建与发布镜像',
-    install: 'docker version',
-    build: 'docker build -t app:latest .',
-    start: 'docker run -d -p 8080:8080 --name app app:latest',
-    defaultPort: '8080',
-  },
-]
 
 function toSafeSlug(name: string): string {
   const trimmed = name.trim().toLowerCase()
@@ -166,9 +103,10 @@ export function NewProjectWizard({
     gitUsername: '',
     gitToken: '',
     runtime: 'Node.js',
+    deployTargetMode: 'docker',
     installCommand: 'npm install',
-    buildCommand: 'npm run build',
-    startCommand: 'npm start',
+    buildCommand: 'docker build -t app:latest .',
+    startCommand: 'docker run -d -p 3000:3000 --name app app:latest',
     selectedServerId: 'srv-001',
     serverName: '生产服务器 1',
     serverIp: '192.168.1.100',
@@ -176,13 +114,35 @@ export function NewProjectWizard({
     serverPath: '/opt/apps/app',
     healthCheckUrl: '',
     runnerMode: 'simulation',
-    artifactType: 'auto',
+    artifactType: 'docker',
     dockerDeliveryMode: 'auto',
   })
 
   const [showDockerfileModal, setShowDockerfileModal] = useState(false)
   const [selectedDockerTemplate, setSelectedDockerTemplate] = useState<DockerfileTemplate>(DOCKERFILE_TEMPLATES[0])
   const [copiedDockerCode, setCopiedDockerCode] = useState(false)
+
+  const currentPlugin = useMemo(() => {
+    return getRuntime(data.runtime) || getAllRuntimes()[0]
+  }, [data.runtime])
+
+  const handleDeployTargetModeChange = (mode: DeployTargetMode) => {
+    const slug = toSafeSlug(data.projectName)
+    const plugin = getRuntime(data.runtime) || getAllRuntimes()[0]
+    const port = Number(data.serverPort) || plugin.defaultPort
+    const install = plugin.getInstallCommand(slug, { mode })
+    const build = plugin.getBuildCommand(slug, { mode })
+    const start = plugin.getStartCommand(slug, port, { mode })
+
+    setData((prev) => ({
+      ...prev,
+      deployTargetMode: mode,
+      artifactType: mode === 'docker' ? 'docker' : 'tar',
+      installCommand: install,
+      buildCommand: build,
+      startCommand: start,
+    }))
+  }
 
   const handleApplyDockerTemplate = (tmpl: DockerfileTemplate) => {
     setSelectedDockerTemplate(tmpl)
@@ -252,12 +212,21 @@ export function NewProjectWizard({
         !prev.serverPath || prev.serverPath.startsWith('/opt/apps/')
       const newPath = shouldUpdatePath ? `/opt/apps/${slug}` : prev.serverPath
 
+      const plugin = getRuntime(prev.runtime) || getAllRuntimes()[0]
+      const port = Number(prev.serverPort) || plugin.defaultPort
+
       let newBuild = prev.buildCommand
       let newStart = prev.startCommand
-      if (prev.runtime === 'Docker') {
-        const port = prev.serverPort || '8080'
-        newBuild = `docker build -t ${slug}:latest .`
-        newStart = `docker run -d -p ${port}:${port} --name ${slug} ${slug}:latest`
+      if (prev.deployTargetMode === 'docker') {
+        if (prev.buildCommand.includes('docker build')) {
+          newBuild = `docker build -t ${slug}:latest .`
+        }
+        if (prev.startCommand.includes('docker run')) {
+          newStart = `docker run -d -p ${port}:${port} --name ${slug} ${slug}:latest`
+        }
+      } else {
+        newBuild = plugin.getBuildCommand(slug, { mode: 'native' })
+        newStart = plugin.getStartCommand(slug, port, { mode: 'native' })
       }
 
       return {
@@ -270,24 +239,24 @@ export function NewProjectWizard({
     })
   }
 
-  const handleRuntimeSelect = (rt: (typeof RUNTIME_PRESETS)[0]) => {
+  const handleRuntimeSelect = (plugin: IRuntimePlugin) => {
     const slug = toSafeSlug(data.projectName)
-    let build = rt.build
-    let start = rt.start
-    if (rt.id === 'Docker') {
-      const port = rt.defaultPort || '8080'
-      build = `docker build -t ${slug}:latest .`
-      start = `docker run -d -p ${port}:${port} --name ${slug} ${slug}:latest`
-    }
+    const port = plugin.defaultPort
+    const mode = data.deployTargetMode || 'docker'
+    const install = plugin.getInstallCommand(slug, { mode })
+    const build = plugin.getBuildCommand(slug, { mode })
+    const start = plugin.getStartCommand(slug, port, { mode })
+    const tmpl = plugin.toDockerfileTemplate()
 
+    setSelectedDockerTemplate(tmpl)
     setData((prev) => ({
       ...prev,
-      runtime: rt.id,
-      installCommand: rt.install,
+      runtime: plugin.name,
+      installCommand: install,
       buildCommand: build,
       startCommand: start,
-      serverPort: rt.defaultPort,
-      artifactType: rt.id === 'Docker' ? 'docker' : prev.artifactType === 'docker' ? 'auto' : prev.artifactType,
+      serverPort: String(port),
+      artifactType: mode === 'docker' ? 'docker' : 'tar',
     }))
   }
 
@@ -303,7 +272,7 @@ export function NewProjectWizard({
   const handleServerPortChange = (port: string) => {
     setData((prev) => {
       let updatedStart = prev.startCommand
-      if (prev.runtime === 'Docker' && prev.startCommand.includes('-p ')) {
+      if (prev.startCommand.includes('-p ')) {
         updatedStart = prev.startCommand.replace(
           /-p\s+["']?(\d+):(\d+)["']?/,
           `-p ${port}:$2`
@@ -373,6 +342,7 @@ export function NewProjectWizard({
         healthCheckUrl: data.healthCheckUrl?.trim() || '',
         runnerMode: data.runnerMode,
         artifactType: data.artifactType,
+        deployTargetMode: data.deployTargetMode,
         dockerDeliveryMode: data.dockerDeliveryMode,
       }
 
@@ -420,11 +390,10 @@ export function NewProjectWizard({
           {steps.map((s, idx) => (
             <div key={s.id} className="flex items-center flex-1">
               <div
-                className={`flex items-center justify-center size-8 rounded-full font-semibold text-xs transition-colors ${
-                  idx <= stepIndex
-                    ? 'bg-primary text-primary-foreground shadow-sm'
-                    : 'bg-muted text-muted-foreground'
-                }`}
+                className={`flex items-center justify-center size-8 rounded-full font-semibold text-xs transition-colors ${idx <= stepIndex
+                  ? 'bg-primary text-primary-foreground shadow-sm'
+                  : 'bg-muted text-muted-foreground'
+                  }`}
               >
                 {idx < stepIndex ? (
                   <Check className="size-4" />
@@ -437,9 +406,8 @@ export function NewProjectWizard({
               </div>
               {idx < steps.length - 1 && (
                 <div
-                  className={`flex-1 h-0.5 mx-2 rounded-full ${
-                    idx < stepIndex ? 'bg-primary' : 'bg-muted'
-                  }`}
+                  className={`flex-1 h-0.5 mx-2 rounded-full ${idx < stepIndex ? 'bg-primary' : 'bg-muted'
+                    }`}
                 />
               )}
             </div>
@@ -492,11 +460,10 @@ export function NewProjectWizard({
                 <div className="grid grid-cols-2 gap-3 mt-1.5">
                   <div
                     onClick={() => setData({ ...data, runnerMode: 'simulation' })}
-                    className={`p-3.5 rounded-lg border-2 cursor-pointer transition-all ${
-                      data.runnerMode === 'simulation'
-                        ? 'border-primary bg-primary/5'
-                        : 'border-border hover:border-primary/40'
-                    }`}
+                    className={`p-3.5 rounded-lg border-2 cursor-pointer transition-all ${data.runnerMode === 'simulation'
+                      ? 'border-primary bg-primary/5'
+                      : 'border-border hover:border-primary/40'
+                      }`}
                   >
                     <p className="text-sm font-semibold">沙箱演示模式</p>
                     <p className="text-xs text-muted-foreground mt-1">
@@ -505,11 +472,10 @@ export function NewProjectWizard({
                   </div>
                   <div
                     onClick={() => setData({ ...data, runnerMode: 'real' })}
-                    className={`p-3.5 rounded-lg border-2 cursor-pointer transition-all ${
-                      data.runnerMode === 'real'
-                        ? 'border-primary bg-primary/5'
-                        : 'border-border hover:border-primary/40'
-                    }`}
+                    className={`p-3.5 rounded-lg border-2 cursor-pointer transition-all ${data.runnerMode === 'real'
+                      ? 'border-primary bg-primary/5'
+                      : 'border-border hover:border-primary/40'
+                      }`}
                   >
                     <p className="text-sm font-semibold">本地真实执行模式</p>
                     <p className="text-xs text-muted-foreground mt-1">
@@ -589,23 +555,88 @@ export function NewProjectWizard({
                 选择应用运行时环境模板
               </label>
               <div className="grid grid-cols-2 gap-2.5">
-                {RUNTIME_PRESETS.map((rt) => (
+                {getAllRuntimes().map((rt) => (
                   <button
                     key={rt.id}
                     type="button"
                     onClick={() => handleRuntimeSelect(rt)}
-                    className={`p-3 rounded-lg border-2 text-left transition-all ${
-                      data.runtime === rt.id
-                        ? 'border-primary bg-primary/5'
-                        : 'border-border hover:border-primary/40'
-                    }`}
+                    className={`p-3 rounded-lg border-2 text-left transition-all ${data.runtime === rt.name || data.runtime === rt.id
+                      ? 'border-primary bg-primary/5'
+                      : 'border-border hover:border-primary/40'
+                      }`}
                   >
-                    <p className="text-sm font-semibold">{rt.name}</p>
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold">{rt.name}</p>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-mono">
+                        :{rt.defaultPort}
+                      </span>
+                    </div>
                     <p className="text-[11px] text-muted-foreground line-clamp-2 mt-0.5">
-                      {rt.desc}
+                      {rt.description}
                     </p>
                   </button>
                 ))}
+              </div>
+
+              {/* 部署载体模式选择 */}
+              <div className="space-y-2 pt-2 border-t border-border">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
+                    <Layers className="size-3.5 text-primary" />
+                    部署载体模式 (Deployment Target Mode) <span className="text-destructive">*</span>
+                  </label>
+                  <span className="text-[11px] text-muted-foreground">
+                    {data.deployTargetMode === 'native'
+                      ? '当前：宿主机原生进程模式'
+                      : '当前：Docker 容器化模式'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => handleDeployTargetModeChange('docker')}
+                    className={`p-3 rounded-lg border-2 text-left transition-all ${data.deployTargetMode === 'docker'
+                      ? 'border-blue-500 bg-blue-500/10 shadow-xs'
+                      : 'border-border hover:border-blue-500/40'
+                      }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold flex items-center gap-1.5 text-foreground">
+                        <Boxes className="size-4 text-blue-400" />
+                        容器部署 (Docker)
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 font-medium">
+                        推荐 / 强隔离
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground mt-1 leading-snug">
+                      多阶段编译为标准 Docker 镜像，通过轻量容器交付，目标主机仅需 Docker，隔离环境冲突。
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleDeployTargetModeChange('native')}
+                    className={`p-3 rounded-lg border-2 text-left transition-all ${data.deployTargetMode === 'native'
+                      ? 'border-amber-500 bg-amber-500/10 shadow-xs'
+                      : 'border-border hover:border-amber-500/40'
+                      }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold flex items-center gap-1.5 text-foreground">
+                        <Terminal className="size-4 text-amber-500" />
+                        原生部署 (宿主机进程)
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 font-medium">
+                        {currentPlugin.nativeProcessManager || '原生进程'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground mt-1 leading-snug">
+                      直接在目标服务器以 {currentPlugin.name} 原生进程运行，SFTP 归档直传，免写任何 Dockerfile。
+                    </p>
+                  </button>
+                </div>
               </div>
 
               <div className="space-y-3 pt-2 border-t border-border">
@@ -645,254 +676,176 @@ export function NewProjectWizard({
                 </div>
               </div>
 
-              {/* Dockerfile Requirement Guidance & Template Presets */}
-              {(data.runtime === 'Docker' ||
-                data.artifactType === 'docker' ||
-                data.buildCommand.toLowerCase().includes('docker build')) && (
-                <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 p-3.5 space-y-3">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <div className="size-6 rounded bg-blue-500/20 text-blue-400 flex items-center justify-center">
-                        <Boxes className="size-3.5" />
+              {/* Docker 模式下的 Dockerfile 规范与镜像分发策略 */}
+              {data.deployTargetMode === 'docker' && (
+                <>
+                  <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 p-3.5 space-y-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <div className="size-6 rounded bg-blue-500/20 text-blue-400 flex items-center justify-center">
+                          <Boxes className="size-3.5" />
+                        </div>
+                        <div>
+                          <span className="text-xs font-bold text-foreground">
+                            Dockerfile 必备规范与模板库
+                          </span>
+                          <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 font-medium">
+                            必须放入项目根目录
+                          </span>
+                        </div>
                       </div>
-                      <div>
-                        <span className="text-xs font-bold text-foreground">
-                          Dockerfile 必备规范与模板库
-                        </span>
-                        <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 font-medium">
-                          必须放入项目根目录
-                        </span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="xs"
+                        onClick={() => setShowDockerfileModal(true)}
+                        className="text-xs text-blue-400 border-blue-500/30 hover:bg-blue-500/10"
+                      >
+                        <Sparkles className="size-3 mr-1" />
+                        打开完整模板库与放置指引
+                      </Button>
+                    </div>
+
+                    <div className="text-[11px] text-muted-foreground bg-background/60 rounded p-2.5 border border-border/60 space-y-1">
+                      <p className="text-foreground font-medium flex items-center gap-1.5">
+                        <span className="size-1.5 rounded-full bg-blue-400" />
+                        <strong>存放位置指引：</strong>
+                        请在 Git 代码仓库<strong>根目录</strong>下创建名为 <code className="text-blue-400 font-mono font-bold">Dockerfile</code> (无后缀) 的文件并提交。
+                      </p>
+                      <p className="pl-3 text-muted-foreground">
+                        构建流水线执行 <code className="font-mono text-foreground">docker build .</code> 时将自动以此文件为蓝本生成镜像。若仓库根目录下缺少该文件，构建将报错。
+                      </p>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="text-[11px] font-semibold text-muted-foreground">
+                          常用技术栈 Dockerfile 模板快速选用：
+                        </label>
+                        <span className="text-[10px] text-muted-foreground">点击切换预览并可同步端口</span>
                       </div>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="xs"
-                      onClick={() => setShowDockerfileModal(true)}
-                      className="text-xs text-blue-400 border-blue-500/30 hover:bg-blue-500/10"
-                    >
-                      <Sparkles className="size-3 mr-1" />
-                      打开完整模板库与放置指引
-                    </Button>
-                  </div>
-
-                  <div className="text-[11px] text-muted-foreground bg-background/60 rounded p-2.5 border border-border/60 space-y-1">
-                    <p className="text-foreground font-medium flex items-center gap-1.5">
-                      <span className="size-1.5 rounded-full bg-blue-400" />
-                      <strong>存放位置指引：</strong>
-                      请在 Git 代码仓库<strong>根目录</strong>下创建名为 <code className="text-blue-400 font-mono font-bold">Dockerfile</code> (无后缀) 的文件并提交。
-                    </p>
-                    <p className="pl-3 text-muted-foreground">
-                      构建流水线执行 <code className="font-mono text-foreground">docker build .</code> 时将自动以此文件为蓝本生成镜像。若仓库根目录下缺少该文件，构建将报错。
-                    </p>
-                  </div>
-
-                  <div>
-                    <div className="flex items-center justify-between mb-1.5">
-                      <label className="text-[11px] font-semibold text-muted-foreground">
-                        常用技术栈 Dockerfile 模板快速选用：
-                      </label>
-                      <span className="text-[10px] text-muted-foreground">点击切换预览并可同步端口</span>
-                    </div>
-                    <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
-                      {DOCKERFILE_TEMPLATES.map((tmpl) => (
-                        <button
-                          key={tmpl.id}
-                          type="button"
-                          onClick={() => setSelectedDockerTemplate(tmpl)}
-                          className={`p-1.5 rounded border text-center transition-all ${
-                            selectedDockerTemplate.id === tmpl.id
+                      <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
+                        {DOCKERFILE_TEMPLATES.map((tmpl) => (
+                          <button
+                            key={tmpl.id}
+                            type="button"
+                            onClick={() => setSelectedDockerTemplate(tmpl)}
+                            className={`p-1.5 rounded border text-center transition-all ${selectedDockerTemplate.id === tmpl.id
                               ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
                               : 'border-border hover:border-blue-500/40 text-muted-foreground hover:text-foreground bg-background/50'
-                          }`}
-                        >
-                          <span className="text-[11px] block truncate">{tmpl.category}</span>
-                          <span className="text-[9px] text-muted-foreground block font-mono">{tmpl.defaultPort}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Code Preview */}
-                  <div className="rounded border border-border/70 bg-[#0d1117] p-2.5 text-xs">
-                    <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-border/40 text-[11px]">
-                      <span className="font-mono text-neutral-300 flex items-center gap-1.5">
-                        <FileCode className="size-3 text-blue-400" />
-                        {selectedDockerTemplate.name}
-                      </span>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => handleApplyDockerTemplate(selectedDockerTemplate)}
-                          className="text-[11px] text-primary hover:underline font-medium"
-                        >
-                          同步该端口 ({selectedDockerTemplate.defaultPort})
-                        </button>
-                        <span className="text-muted-foreground">•</span>
-                        <button
-                          type="button"
-                          onClick={() => handleCopyDockerCode(selectedDockerTemplate.dockerfile)}
-                          className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center gap-1 font-medium"
-                        >
-                          {copiedDockerCode ? <Check className="size-3 text-emerald-400" /> : <Copy className="size-3" />}
-                          {copiedDockerCode ? '已复制' : '复制代码'}
-                        </button>
+                              }`}
+                          >
+                            <span className="text-[11px] block truncate">{tmpl.category}</span>
+                            <span className="text-[9px] text-muted-foreground block font-mono">{tmpl.defaultPort}</span>
+                          </button>
+                        ))}
                       </div>
                     </div>
-                    <pre className="font-mono text-[11px] text-neutral-300 max-h-[120px] overflow-y-auto leading-relaxed scrollbar-thin">
-                      <code>{selectedDockerTemplate.dockerfile}</code>
-                    </pre>
+
+                    {/* Code Preview */}
+                    <div className="rounded border border-border/70 bg-[#0d1117] p-2.5 text-xs">
+                      <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-border/40 text-[11px]">
+                        <span className="font-mono text-neutral-300 flex items-center gap-1.5">
+                          <FileCode className="size-3 text-blue-400" />
+                          {selectedDockerTemplate.name}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleApplyDockerTemplate(selectedDockerTemplate)}
+                            className="text-[11px] text-primary hover:underline font-medium"
+                          >
+                            同步该端口 ({selectedDockerTemplate.defaultPort})
+                          </button>
+                          <span className="text-muted-foreground">•</span>
+                          <button
+                            type="button"
+                            onClick={() => handleCopyDockerCode(selectedDockerTemplate.dockerfile)}
+                            className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center gap-1 font-medium"
+                          >
+                            {copiedDockerCode ? <Check className="size-3 text-emerald-400" /> : <Copy className="size-3" />}
+                            {copiedDockerCode ? '已复制' : '复制代码'}
+                          </button>
+                        </div>
+                      </div>
+                      <pre className="font-mono text-[11px] text-neutral-300 max-h-[120px] overflow-y-auto leading-relaxed scrollbar-thin">
+                        <code>{selectedDockerTemplate.dockerfile}</code>
+                      </pre>
+                    </div>
                   </div>
-                </div>
-              )}
 
-              {/* Artifact Delivery Mechanism */}
-              <div className="space-y-3 pt-3 border-t border-border">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
-                    产物打包与远程分发策略 (Artifact Distribution)
-                  </label>
-                  <span className="text-[11px] font-medium text-muted-foreground">
-                    {data.artifactType === 'docker' ||
-                    (data.artifactType === 'auto' &&
-                      (data.runtime === 'Docker' ||
-                        data.buildCommand.toLowerCase().includes('docker build')))
-                      ? '🎯 判定生效: Docker 镜像机制'
-                      : '🎯 判定生效: Tar 归档机制'}
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setData({ ...data, artifactType: 'auto' })}
-                    className={`p-2.5 rounded-lg border text-left transition-all ${
-                      data.artifactType === 'auto'
-                        ? 'border-primary bg-primary/5 text-primary'
-                        : 'border-border hover:border-primary/40 text-muted-foreground'
-                    }`}
-                  >
-                    <p className="text-xs font-semibold flex items-center gap-1.5">
-                      <span className="size-2 rounded-full bg-primary" />
-                      自动适配 (推荐)
-                    </p>
-                    <p className="text-[10px] text-muted-foreground mt-1 leading-snug">
-                      按运行时或构建指令智能选用 Docker / Tar 机制
-                    </p>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setData({ ...data, artifactType: 'docker' })}
-                    className={`p-2.5 rounded-lg border text-left transition-all ${
-                      data.artifactType === 'docker'
-                        ? 'border-blue-500 bg-blue-500/10 text-blue-400'
-                        : 'border-border hover:border-blue-500/40 text-muted-foreground'
-                    }`}
-                  >
-                    <p className="text-xs font-semibold flex items-center gap-1.5">
-                      <Boxes className="size-3.5 text-blue-400" />
-                      Docker 镜像分发
-                    </p>
-                    <p className="text-[10px] text-muted-foreground mt-1 leading-snug">
-                      docker save ➔ SFTP ➔ docker load
-                    </p>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setData({ ...data, artifactType: 'tar' })}
-                    className={`p-2.5 rounded-lg border text-left transition-all ${
-                      data.artifactType === 'tar'
-                        ? 'border-amber-500 bg-amber-500/10 text-amber-400'
-                        : 'border-border hover:border-amber-500/40 text-muted-foreground'
-                    }`}
-                  >
-                    <p className="text-xs font-semibold flex items-center gap-1.5">
-                      <FolderArchive className="size-3.5 text-amber-400" />
-                      Tar 归档包分发
-                    </p>
-                    <p className="text-[10px] text-muted-foreground mt-1 leading-snug">
-                      tar -czf ➔ SFTP ➔ tar -xzf 解压
-                    </p>
-                  </button>
-                </div>
-
-                {/* Docker Sub-delivery Mode Selector */}
-                {(data.artifactType === 'docker' ||
-                  (data.artifactType === 'auto' &&
-                    (data.runtime === 'Docker' ||
-                      data.buildCommand.toLowerCase().includes('docker build')))) && (
-                  <div className="p-3 rounded-lg border border-blue-500/30 bg-blue-500/5 space-y-2">
+                  {/* Docker Delivery Mechanism */}
+                  <div className="space-y-3 pt-3 border-t border-border">
                     <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                      <label className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
                         <Boxes className="size-3.5 text-blue-400" />
-                        Docker 镜像分发通道策略
-                      </span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 font-mono">
-                        {data.dockerDeliveryMode === 'auto'
-                          ? '自动策略 (优先根据系统设置)'
-                          : data.dockerDeliveryMode === 'registry'
-                            ? '中心镜像仓库模式'
-                            : 'SFTP 离线直连模式'}
+                        Docker 容器交付分发策略 (Docker Delivery Strategy)
+                      </label>
+                      <span className="text-[11px] font-medium text-blue-400">
+                        🎯 统一 Docker 容器化交付体系
                       </span>
                     </div>
 
                     <div className="grid grid-cols-3 gap-2">
                       <button
                         type="button"
-                        onClick={() => setData({ ...data, dockerDeliveryMode: 'auto' })}
-                        className={`p-2 rounded border text-left transition-all ${
-                          data.dockerDeliveryMode === 'auto'
-                            ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
-                            : 'border-border hover:border-blue-500/40 text-muted-foreground'
-                        }`}
+                        onClick={() => setData({ ...data, dockerDeliveryMode: 'auto', artifactType: 'docker' })}
+                        className={`p-2.5 rounded-lg border text-left transition-all ${data.dockerDeliveryMode === 'auto'
+                          ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
+                          : 'border-border hover:border-blue-500/40 text-muted-foreground'
+                          }`}
                       >
-                        <p className="text-xs font-semibold">自动策略 (推荐)</p>
-                        <p className="text-[10px] text-muted-foreground mt-0.5">有 Registry 走仓库，无则直连</p>
+                        <p className="text-xs font-semibold flex items-center gap-1.5">
+                          <span className="size-2 rounded-full bg-blue-400" />
+                          自动策略 (推荐)
+                        </p>
+                        <p className="text-[10px] text-muted-foreground mt-1 leading-snug">
+                          若系统已配置 Registry 则优先走仓库，否则自动选用 SFTP 离线直连
+                        </p>
                       </button>
 
                       <button
                         type="button"
-                        onClick={() => setData({ ...data, dockerDeliveryMode: 'save_load' })}
-                        className={`p-2 rounded border text-left transition-all ${
-                          data.dockerDeliveryMode === 'save_load'
-                            ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
-                            : 'border-border hover:border-blue-500/40 text-muted-foreground'
-                        }`}
+                        onClick={() => setData({ ...data, dockerDeliveryMode: 'save_load', artifactType: 'docker' })}
+                        className={`p-2.5 rounded-lg border text-left transition-all ${data.dockerDeliveryMode === 'save_load'
+                          ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
+                          : 'border-border hover:border-blue-500/40 text-muted-foreground'
+                          }`}
                       >
-                        <p className="text-xs font-semibold">SFTP 离线直连</p>
-                        <p className="text-[10px] text-muted-foreground mt-0.5">docker save ➔ SFTP ➔ load</p>
+                        <p className="text-xs font-semibold flex items-center gap-1.5">
+                          <HardDrive className="size-3.5 text-blue-400" />
+                          SFTP 离线直连
+                        </p>
+                        <p className="text-[10px] text-muted-foreground mt-1 leading-snug">
+                          无外部仓库依赖：docker save ➔ gzip 压缩 ➔ SFTP 传输 ➔ load
+                        </p>
                       </button>
 
                       <button
                         type="button"
-                        onClick={() => setData({ ...data, dockerDeliveryMode: 'registry' })}
-                        className={`p-2 rounded border text-left transition-all ${
-                          data.dockerDeliveryMode === 'registry'
-                            ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
-                            : 'border-border hover:border-blue-500/40 text-muted-foreground'
-                        }`}
+                        onClick={() => setData({ ...data, dockerDeliveryMode: 'registry', artifactType: 'docker' })}
+                        className={`p-2.5 rounded-lg border text-left transition-all ${data.dockerDeliveryMode === 'registry'
+                          ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
+                          : 'border-border hover:border-blue-500/40 text-muted-foreground'
+                          }`}
                       >
-                        <p className="text-xs font-semibold">企业镜像仓库</p>
-                        <p className="text-[10px] text-muted-foreground mt-0.5">docker push ➔ Registry ➔ pull</p>
+                        <p className="text-xs font-semibold flex items-center gap-1.5">
+                          <Boxes className="size-3.5 text-blue-400" />
+                          企业中心镜像仓库
+                        </p>
+                        <p className="text-[10px] text-muted-foreground mt-1 leading-snug">
+                          标准集群推拉：docker push 至 Registry ➔ 目标主机 docker pull
+                        </p>
                       </button>
                     </div>
-                  </div>
-                )}
 
-                <div className="p-2.5 rounded-md bg-muted/40 border border-border/70 text-[11px] text-muted-foreground flex items-start gap-2">
-                  {data.artifactType === 'docker' ||
-                  (data.artifactType === 'auto' &&
-                    (data.runtime === 'Docker' ||
-                      data.buildCommand.toLowerCase().includes('docker build'))) ? (
-                    <>
+                    <div className="p-2.5 rounded-md bg-muted/40 border border-border/70 text-[11px] text-muted-foreground flex items-start gap-2">
                       <Boxes className="size-4 text-blue-400 shrink-0 mt-0.5" />
                       <span>
                         {data.dockerDeliveryMode === 'registry' ? (
                           <>
                             <strong className="text-foreground">Docker 镜像仓库分发机制：</strong>
-                            本地构建镜像 ➔ 标记中央仓库全量 Tag ➔ <code className="text-blue-400">docker push</code> 推送至 Registry ➔ 目标主机远程 <code className="text-blue-400">docker pull</code> 高速拉取 ➔ 映射本地别名并启动容器。
+                            本地构建镜像 ➔ 标记中央仓库全量 Tag ➔ <code className="text-blue-400">docker push</code> 推送至 Registry ➔ 目标主机远程 <code className="text-blue-400">docker pull</code> 高速拉取 ➔ 启动容器。
                           </>
                         ) : (
                           <>
@@ -901,18 +854,55 @@ export function NewProjectWizard({
                           </>
                         )}
                       </span>
-                    </>
-                  ) : (
-                    <>
-                      <FolderArchive className="size-4 text-amber-400 shrink-0 mt-0.5" />
-                      <span>
-                        <strong className="text-foreground">常规文件归档分发流程：</strong>
-                        本地编译构建 ➔ <code className="text-amber-400">tar -czf</code> 打包产物（排除 .git）➔ SFTP 远程分发 ➔ 目标主机 <code className="text-amber-400">tar -xzf</code> 解压至目标目录 ➔ 启动进程。
-                      </span>
-                    </>
-                  )}
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* 原生模式下的运行环境要求与分发说明 */}
+              {data.deployTargetMode === 'native' && (
+                <div className="space-y-3 pt-3 border-t border-border">
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3.5 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className="size-6 rounded bg-amber-500/20 text-amber-400 flex items-center justify-center">
+                          <Terminal className="size-3.5" />
+                        </div>
+                        <div>
+                          <span className="text-xs font-bold text-foreground">
+                            {currentPlugin.name} 原生部署运行规范与分发机制
+                          </span>
+                          <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-medium">
+                            {currentPlugin.nativeProcessManager || '原生进程托管'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="text-[11px] text-muted-foreground bg-background/60 rounded p-2.5 border border-border/60 space-y-2 leading-relaxed">
+                      <div>
+                        <p className="text-foreground font-medium flex items-center gap-1.5">
+                          <span className="size-1.5 rounded-full bg-amber-400" />
+                          <strong>目标服务器环境要求：</strong>
+                        </p>
+                        <p className="pl-3 text-muted-foreground mt-0.5">
+                          {currentPlugin.nativeRequirementDesc || '目标服务器需具备对应语言运行环境与工具依赖。'}在点击【立即部署】时，平台前置探针将自动校验目标主机环境 (需依赖: <code className="text-amber-400 font-mono">{currentPlugin.getRequiredTools('native').join('、') || '基础依赖'}</code>)。
+                        </p>
+                      </div>
+
+                      <div className="pt-1 border-t border-border/40">
+                        <p className="text-foreground font-medium flex items-center gap-1.5">
+                          <span className="size-1.5 rounded-full bg-amber-400" />
+                          <strong>交付分发管道：</strong>
+                        </p>
+                        <p className="pl-3 text-muted-foreground mt-0.5">
+                          构建引擎在本地执行编译（如 <code className="text-amber-400 font-mono">{data.buildCommand || currentPlugin.defaultNativeBuildCmd}</code>）后，将应用产物打包为 <code className="text-amber-400 font-mono">.tar.gz</code> 归档包，通过 SFTP 安全管道直传目标服务器目标目录并解压，最后通过 SSH 会话执行启动命令。
+                        </p>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           )}
 
@@ -1035,43 +1025,51 @@ export function NewProjectWizard({
               </div>
 
               <div className="p-3.5 rounded-lg bg-muted/40 border border-border/80">
-                <span className="text-xs text-muted-foreground block">产物分发交付机制</span>
+                <span className="text-xs text-muted-foreground block">交付与分发机制</span>
                 <div className="flex items-center gap-2 mt-1">
-                  {data.artifactType === 'docker' ||
-                  (data.artifactType === 'auto' &&
-                    (data.runtime === 'Docker' ||
-                      data.buildCommand.toLowerCase().includes('docker build'))) ? (
+                  {data.deployTargetMode === 'native' ? (
+                    <>
+                      <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-amber-500/10 text-amber-500 border border-amber-500/30 text-xs font-semibold">
+                        <Terminal className="size-3.5" />
+                        原生进程交付 (Native SFTP)
+                      </div>
+                      <span className="text-xs text-muted-foreground">
+                        (SFTP 产物归档直传 ➔ 目标机解压 ➔ {currentPlugin.nativeProcessManager || '原生进程'}启动)
+                      </span>
+                    </>
+                  ) : (
                     <>
                       <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30 text-xs font-semibold">
                         <Boxes className="size-3.5" />
-                        Docker 镜像机制
+                        Docker 容器交付
                       </div>
                       <span className="text-xs text-muted-foreground">
                         {data.dockerDeliveryMode === 'registry'
                           ? '(企业镜像仓库: docker push ➔ Registry ➔ docker pull)'
                           : data.dockerDeliveryMode === 'save_load'
                             ? '(SFTP 离线直连: docker save ➔ SFTP ➔ docker load)'
-                            : '(自动适配策略: 优先根据仓库配置选择)'}
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/30 text-xs font-semibold">
-                        <FolderArchive className="size-3.5" />
-                        常规文件归档机制
-                      </div>
-                      <span className="text-xs text-muted-foreground">
-                        (tar -czf 打包 ➔ SFTP 远程分发 ➔ tar -xzf 解压)
+                            : '(自动推荐策略: 优先根据仓库配置选用)'}
                       </span>
                     </>
                   )}
                 </div>
               </div>
 
-              {(data.artifactType === 'docker' ||
-                (data.artifactType === 'auto' &&
-                  (data.runtime === 'Docker' ||
-                    data.buildCommand.toLowerCase().includes('docker build')))) && (
+              {data.deployTargetMode === 'native' ? (
+                <div className="p-3.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-2 text-amber-300">
+                    <Terminal className="size-4 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-semibold text-amber-200">
+                        原生部署就绪提醒
+                      </p>
+                      <p className="text-muted-foreground text-[11px] mt-0.5">
+                        项目已配置为目标主机原生部署模式。部署时系统将自动检测目标服务器 {currentPlugin.name} 运行环境 ({currentPlugin.getRequiredTools('native').join('、') || '原生依赖'})，并通过 SFTP 上传归档解压运行。
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ) : (
                 <div className="p-3.5 rounded-lg bg-blue-500/10 border border-blue-500/30 text-xs flex items-start justify-between gap-3">
                   <div className="flex items-start gap-2 text-blue-300">
                     <Boxes className="size-4 shrink-0 mt-0.5" />

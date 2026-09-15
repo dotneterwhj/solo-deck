@@ -10,6 +10,7 @@ import {
   Menu,
   X,
   Workflow,
+  LogOut,
 } from 'lucide-react'
 
 export type ViewType = 'dashboard' | 'list' | 'servers' | 'settings'
@@ -18,9 +19,11 @@ interface SidebarProps {
   currentView: ViewType
   onViewChange: (view: ViewType) => void
   onOpenHelp?: () => void
+  currentUser?: string
+  onLogout?: () => void
 }
 
-export function Sidebar({ currentView, onViewChange, onOpenHelp }: SidebarProps) {
+export function Sidebar({ currentView, onViewChange, onOpenHelp, currentUser, onLogout }: SidebarProps) {
   const [isExpanded, setIsExpanded] = useState(true)
 
   const navItems = [
@@ -58,9 +61,8 @@ export function Sidebar({ currentView, onViewChange, onOpenHelp }: SidebarProps)
 
       {/* Sidebar */}
       <aside
-        className={`fixed left-0 top-0 h-screen bg-sidebar border-r border-sidebar-border transition-all duration-300 z-40 ${
-          isExpanded ? 'w-64' : 'w-20'
-        } lg:relative lg:z-0 flex flex-col`}
+        className={`fixed left-0 top-0 h-screen bg-sidebar border-r border-sidebar-border transition-all duration-300 z-40 ${isExpanded ? 'w-64' : 'w-20'
+          } lg:relative lg:z-0 flex flex-col`}
       >
         {/* Logo */}
         <div className="h-16 flex items-center justify-between px-4 border-b border-sidebar-border shrink-0">
@@ -71,7 +73,7 @@ export function Sidebar({ currentView, onViewChange, onOpenHelp }: SidebarProps)
             {isExpanded && (
               <div className="truncate">
                 <span className="font-bold text-sidebar-foreground text-base tracking-tight block">
-                  CICD 运维平台
+                  Solo Deck
                 </span>
                 <span className="text-[10px] text-muted-foreground block -mt-0.5">
                   轻量自研自动化交付
@@ -104,11 +106,10 @@ export function Sidebar({ currentView, onViewChange, onOpenHelp }: SidebarProps)
               <button
                 key={item.id}
                 onClick={() => onViewChange(item.id)}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
-                  isActive
-                    ? 'bg-primary text-primary-foreground shadow-sm'
-                    : 'text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
-                }`}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${isActive
+                  ? 'bg-primary text-primary-foreground shadow-sm'
+                  : 'text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+                  }`}
                 title={item.label}
               >
                 <Icon className="size-4.5 shrink-0" />
@@ -119,15 +120,26 @@ export function Sidebar({ currentView, onViewChange, onOpenHelp }: SidebarProps)
         </nav>
 
         {/* Bottom Actions */}
-        <div className="border-t border-sidebar-border p-3 shrink-0">
+        <div className="border-t border-sidebar-border p-3 shrink-0 space-y-1">
           <button
             onClick={onOpenHelp}
             className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-sidebar-foreground hover:bg-sidebar-accent transition-colors"
             title="平台帮助与操作指引"
           >
             <HelpCircle className="size-4.5 shrink-0 text-muted-foreground" />
-            {isExpanded && <span className="truncate">平台使用指南</span>}
+            {isExpanded && <span className="truncate">Solo Deck 平台使用指南</span>}
           </button>
+
+          {onLogout && (
+            <button
+              onClick={onLogout}
+              className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+              title="退出登录"
+            >
+              <LogOut className="size-4.5 shrink-0" />
+              {isExpanded && <span className="truncate">退出登录 ({currentUser || 'admin'})</span>}
+            </button>
+          )}
         </div>
       </aside>
     </>

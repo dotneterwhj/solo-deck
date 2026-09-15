@@ -1,7 +1,5 @@
 import fs from 'fs'
 import path from 'path'
-import zlib from 'zlib'
-import { pipeline } from 'stream'
 import { spawn, exec, ChildProcess } from 'child_process'
 import { Client } from 'ssh2'
 import { wrapSshCommand } from './shell-env'
@@ -24,8 +22,10 @@ import {
   getServerById,
   getServerByIp,
   getSettings,
+  createNotification,
 } from './db'
 import { DockerDistributorFactory } from './docker-distributor'
+import { getRuntime } from './runtimes'
 
 export type StreamEventType = 'log' | 'status' | 'end'
 
@@ -104,17 +104,40 @@ class PipelineManager {
         appendDeployLog(deploymentId, cancelLog)
         this.emit(deploymentId, { type: 'log', deploymentId, payload: cancelLog })
 
+        const durationSeconds = dep.startTime
+          ? Math.round((Date.now() - new Date(dep.startTime).getTime()) / 1000)
+          : undefined
+
         updateDeployment(deploymentId, {
           status: 'cancelled',
           endTime: new Date().toISOString(),
+          durationSeconds,
           currentStep: '已取消',
         })
+
+        createNotification({
+          type: 'deployment',
+          level: 'warning',
+          title: `项目【${dep.projectName}】部署任务已取消`,
+          message: `已手动终止分支 ${dep.branch} 的部署流水线。`,
+          metadata: {
+            projectId: dep.projectId,
+            projectName: dep.projectName,
+            deploymentId: dep.id,
+            link: 'deployment',
+          },
+        })
+
         this.emit(deploymentId, {
           type: 'status',
           deploymentId,
-          payload: { status: 'cancelled', currentStep: '已取消' },
+          payload: { status: 'cancelled', currentStep: '已取消', durationSeconds, startTime: dep.startTime },
         })
-        this.emit(deploymentId, { type: 'end', deploymentId, payload: { status: 'cancelled' } })
+        this.emit(deploymentId, {
+          type: 'end',
+          deploymentId,
+          payload: { status: 'cancelled', durationSeconds },
+        })
       }
       return true
     }
@@ -191,7 +214,7 @@ class PipelineManager {
       this.emit(deploymentId, {
         type: 'status',
         deploymentId,
-        payload: { status, currentStep },
+        payload: { status, currentStep, startTime: deployment.startTime },
       })
     }
 
@@ -233,15 +256,28 @@ class PipelineManager {
         status: 'error',
       })
 
+      createNotification({
+        type: 'deployment',
+        level: 'error',
+        title: `项目【${project.name}】部署失败`,
+        message: `分支 ${project.branch} 流水线执行异常终止：${err.message || '未知错误'}`,
+        metadata: {
+          projectId: project.id,
+          projectName: project.name,
+          deploymentId,
+          link: 'deployment',
+        },
+      })
+
       this.emit(deploymentId, {
         type: 'status',
         deploymentId,
-        payload: { status: 'failed', currentStep: '部署异常' },
+        payload: { status: 'failed', currentStep: '部署异常', durationSeconds, startTime: deployment.startTime },
       })
       this.emit(deploymentId, {
         type: 'end',
         deploymentId,
-        payload: { status: 'failed' },
+        payload: { status: 'failed', durationSeconds },
       })
     } finally {
       this.activeControllers.delete(deploymentId)
@@ -387,15 +423,18 @@ class PipelineManager {
     }
 
     // -------------------------------------------------------------
-    // 生成与绑定 Docker 镜像版本标签（方案 B：时间戳 + Git短Hash）
+    // 部署模式判定：Docker 容器化交付 vs 原生目标机进程部署
     // -------------------------------------------------------------
-    const isDockerMode =
-      project.artifactType === 'docker' ||
-      (project.artifactType !== 'tar' &&
-        (project.runtime === 'Docker' ||
-          (project.buildCommand && project.buildCommand.toLowerCase().includes('docker build'))))
-
-    if (isDockerMode) {
+    const targetMode = project.deployTargetMode || 'docker'
+    const runtimePlugin = getRuntime(project.runtime)
+    if (targetMode === 'native') {
+      log(`[00:03] 【目标载体】原生宿主机进程部署模式 (Native)`, 'info', 'GIT_CLONE')
+      const procManager = runtimePlugin?.nativeProcessManager || '原生系统进程'
+      log(`[00:03] 语言运行时: ${project.runtime || runtimePlugin?.name || '通用原生'} | 启动管理: ${procManager}`, 'info', 'GIT_CLONE')
+    } else {
+      // -------------------------------------------------------------
+      // 生成与绑定 Docker 镜像版本标签（时间戳 + Git短Hash）
+      // -------------------------------------------------------------
       const versionTag =
         deployment.triggerType === 'rollback' && deployment.versionTag
           ? deployment.versionTag
@@ -416,7 +455,7 @@ class PipelineManager {
         )
       } else {
         log(
-          `[00:03] 【Docker 版本化管理 (方案B)】自动分配版本标签: [${versionTag}] (基于时间戳 + Git Hash: ${effectiveCommitHash || 'auto'})`,
+          `[00:03] 【Docker 容器版本管理】自动分配版本标签: [${versionTag}] (基于时间戳 + Git Hash: ${effectiveCommitHash || 'auto'})`,
           'success',
           'GIT_CLONE'
         )
@@ -456,7 +495,7 @@ class PipelineManager {
       setStatus('running', '应用构建')
 
       let effectiveBuildCmd = project.buildCommand
-      if (isDockerMode && effectiveBuildCmd.toLowerCase().includes('docker build')) {
+      if (targetMode === 'docker' && effectiveBuildCmd.toLowerCase().includes('docker build')) {
         // 预检工作区代码仓库中是否存在 Dockerfile
         const fileMatch = effectiveBuildCmd.match(/(?:-f|--file)\s+([^\s]+)/)
         const targetDockerfileName = fileMatch ? fileMatch[1] : 'Dockerfile'
@@ -503,6 +542,8 @@ class PipelineManager {
           log(`[00:07] ➔ 永久不可变版本: ${versionedTag}`, 'info', 'BUILD')
           log(`[00:07] ➔ 运行时最新别名: ${latestTag}`, 'info', 'BUILD')
         }
+      } else if (targetMode === 'native') {
+        log(`[00:06] 原生宿主机构建: 执行应用构建命令`, 'info', 'BUILD')
       }
 
       log(`[00:07] 执行应用构建命令: ${effectiveBuildCmd}`, 'info', 'BUILD')
@@ -545,55 +586,76 @@ class PipelineManager {
     if (isLocalhost) {
       log(`[00:11] 目标为本机节点 (127.0.0.1)，执行本地 Shell 启动: ${project.startCommand}`, 'info', 'DEPLOY')
       if (project.startCommand && project.startCommand.trim()) {
-        const containerName = this.extractDockerContainerName(project.startCommand)
-        if (containerName) {
-          log(`[00:11] 正在检查本机同名 Docker 容器 [${containerName}]...`, 'info', 'DEPLOY')
-          await this.cleanupLocalDockerContainer(containerName, log)
-        }
-
-        let stderrBuffer = ''
-        const captureLog = (text: string, type?: 'info' | 'success' | 'error' | 'warning', step?: string) => {
-          log(text, type, step)
-          if (type === 'error' || type === 'warning') {
-            stderrBuffer += text + '\n'
+        if (targetMode === 'docker') {
+          const containerName = this.extractDockerContainerName(project.startCommand)
+          if (containerName) {
+            log(`[00:11] 正在检查本机同名 Docker 容器 [${containerName}]...`, 'info', 'DEPLOY')
+            await this.cleanupLocalDockerContainer(containerName, log)
           }
-        }
 
-        let startExit = await this.spawnShell(
-          project.startCommand,
-          workspaceDir,
-          {},
-          abortController.signal,
-          captureLog
-        )
-
-        // 容错恢复：如果仍发生 Docker 容器名称冲突，自动清理冲突容器并重试一次
-        if (startExit !== 0 && !abortController.signal.aborted) {
-          const conflictMatch = stderrBuffer.match(
-            /Conflict\.\s+The container name\s+["']?\/?([^"'\s]+)["']?\s+is already in use/i
-          )
-          if (conflictMatch) {
-            const conflictName = conflictMatch[1] || containerName
-            if (conflictName) {
-              log(
-                `[!] 检测到本机 Docker 容器名称冲突 [${conflictName}]，执行自动清理并重试启动...`,
-                'warning',
-                'DEPLOY'
-              )
-              await this.cleanupLocalDockerContainer(conflictName, log)
-              startExit = await this.spawnShell(
-                project.startCommand,
-                workspaceDir,
-                {},
-                abortController.signal,
-                log
-              )
+          let stderrBuffer = ''
+          const captureLog = (text: string, type?: 'info' | 'success' | 'error' | 'warning', step?: string) => {
+            log(text, type, step)
+            if (type === 'error' || type === 'warning') {
+              stderrBuffer += text + '\n'
             }
           }
-        }
 
-        if (startExit !== 0) {
-          throw new Error(`服务启动命令返回错误码: ${startExit}`)
+          let startExit = await this.spawnShell(
+            project.startCommand,
+            workspaceDir,
+            {},
+            abortController.signal,
+            captureLog
+          )
+
+          // 容错恢复：如果仍发生 Docker 容器名称冲突，自动清理冲突容器并重试一次
+          if (startExit !== 0 && !abortController.signal.aborted) {
+            const conflictMatch = stderrBuffer.match(
+              /Conflict\.\s+The container name\s+["']?\/?([^"'\s]+)["']?\s+is already in use/i
+            )
+            if (conflictMatch) {
+              const conflictName = conflictMatch[1] || containerName
+              if (conflictName) {
+                log(
+                  `[!] 检测到本机 Docker 容器名称冲突 [${conflictName}]，执行自动清理并重试启动...`,
+                  'warning',
+                  'DEPLOY'
+                )
+                await this.cleanupLocalDockerContainer(conflictName, log)
+                startExit = await this.spawnShell(
+                  project.startCommand,
+                  workspaceDir,
+                  {},
+                  abortController.signal,
+                  log
+                )
+              }
+            }
+          }
+
+          if (startExit !== 0) {
+            throw new Error(`服务启动命令返回错误码: ${startExit}`)
+          }
+        } else {
+          // 原生本地进程启动
+          const envMap: Record<string, string> = { PORT: String(project.port || 3000) }
+          if (project.envVars && project.envVars.length > 0) {
+            project.envVars.forEach((ev) => {
+              envMap[ev.key] = ev.value
+            })
+          }
+          log(`[00:11] 原生模式派发本地进程启动: ${project.startCommand}`, 'info', 'DEPLOY')
+          const startExit = await this.spawnShell(
+            project.startCommand,
+            workspaceDir,
+            envMap,
+            abortController.signal,
+            log
+          )
+          if (startExit !== 0) {
+            throw new Error(`原生服务启动命令返回错误码: ${startExit}`)
+          }
         }
       }
       log(`[00:12] ✓ 本地服务启动命令已派发`, 'success', 'DEPLOY')
@@ -660,15 +722,28 @@ class PipelineManager {
       lastVersionTag: deployment.versionTag,
     })
 
+    createNotification({
+      type: 'deployment',
+      level: 'success',
+      title: `项目【${project.name}】部署成功`,
+      message: `分支 ${project.branch} (${deployment.commitHash?.slice(0, 7) || '最新'}) 真实交付顺利完成，耗时 ${durationSeconds} 秒。`,
+      metadata: {
+        projectId: project.id,
+        projectName: project.name,
+        deploymentId,
+        link: 'deployment',
+      },
+    })
+
     this.emit(deploymentId, {
       type: 'status',
       deploymentId,
-      payload: { status: 'success', currentStep: '部署完成', durationSeconds },
+      payload: { status: 'success', currentStep: '部署完成', durationSeconds, startTime: deployment.startTime },
     })
     this.emit(deploymentId, {
       type: 'end',
       deploymentId,
-      payload: { status: 'success' },
+      payload: { status: 'success', durationSeconds },
     })
   }
 
@@ -752,6 +827,33 @@ class PipelineManager {
           log(`[00:11] 检测到本机已存在同名 Docker 容器 [${containerName}]，已平滑停止并安全移除旧容器`, 'success', 'DEPLOY')
         }
         resolve()
+      })
+    })
+  }
+
+  /**
+   * 将工作空间构建产物打包为 tar.gz 归档文件（自动排除 .git 源码元数据）
+   */
+  private packageTarArtifact(workspaceDir: string, archivePath: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const parentDir = path.dirname(archivePath)
+      if (!fs.existsSync(parentDir)) {
+        fs.mkdirSync(parentDir, { recursive: true })
+      }
+      // 使用系统内置 tar (Windows 10+ 与 Linux 均原生内置)
+      const tarProcess = spawn('tar', ['-czf', archivePath, '--exclude=.git', '.'], {
+        cwd: workspaceDir,
+      })
+
+      tarProcess.on('close', (code) => {
+        if (code === 0) {
+          resolve()
+        } else {
+          reject(new Error(`产物打包失败，tar 进程退出码: ${code}`))
+        }
+      })
+      tarProcess.on('error', (err) => {
+        reject(new Error(`产物打包执行异常: ${err.message}`))
       })
     })
   }
@@ -929,80 +1031,7 @@ class PipelineManager {
   }
 
   /**
-   * 将本地 Docker 镜像通过 docker save 导出并压缩为 tar.gz
-   */
-  private exportDockerImage(imageTag: string, archivePath: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const parentDir = path.dirname(archivePath)
-      if (!fs.existsSync(parentDir)) {
-        fs.mkdirSync(parentDir, { recursive: true })
-      }
-
-      const dockerProcess = spawn('docker', ['save', imageTag])
-      const gzip = zlib.createGzip({ level: 6 })
-      const writeStream = fs.createWriteStream(archivePath)
-      let stderrText = ''
-
-      dockerProcess.stderr?.on('data', (chunk) => {
-        stderrText += chunk.toString()
-      })
-
-      dockerProcess.on('error', (err) => {
-        writeStream.destroy()
-        reject(
-          new Error(
-            `无法调用宿主机 docker 命令: ${err.message}。请确认宿主机已安装 Docker 并且当前系统用户有权执行 docker save 命令`
-          )
-        )
-      })
-
-      pipeline(dockerProcess.stdout, gzip, writeStream, (err) => {
-        if (err) {
-          reject(new Error(`Docker 镜像压缩保存失败: ${err.message}`))
-        } else if (dockerProcess.exitCode !== null && dockerProcess.exitCode !== 0) {
-          reject(
-            new Error(
-              `docker save 命令返回非零退出码 (${dockerProcess.exitCode}): ${
-                stderrText.trim() || '未找到镜像 ' + imageTag
-              }`
-            )
-          )
-        } else {
-          resolve()
-        }
-      })
-    })
-  }
-
-  /**
-   * 将工作空间构建产物打包为 tar.gz 归档文件（自动排除 .git 源码元数据）
-   */
-  private packageTarArtifact(workspaceDir: string, archivePath: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const parentDir = path.dirname(archivePath)
-      if (!fs.existsSync(parentDir)) {
-        fs.mkdirSync(parentDir, { recursive: true })
-      }
-      // 使用系统内置 tar (Windows 10+ 与 Linux 均原生内置)
-      const tarProcess = spawn('tar', ['-czf', archivePath, '--exclude=.git', '.'], {
-        cwd: workspaceDir,
-      })
-
-      tarProcess.on('close', (code) => {
-        if (code === 0) {
-          resolve()
-        } else {
-          reject(new Error(`产物打包失败，tar 进程退出码: ${code}`))
-        }
-      })
-      tarProcess.on('error', (err) => {
-        reject(new Error(`产物打包执行异常: ${err.message}`))
-      })
-    })
-  }
-
-  /**
-   * 远程主机真实部署流水线（支持两套独立机制：Docker 镜像分发 vs 常规文件/源码 tar 包分发）
+   * 远程主机真实部署流水线（统一基于 Docker 容器化分发与部署机制）
    */
   private executeRemoteDeployment(
     server: ServerNode,
@@ -1041,23 +1070,162 @@ class PipelineManager {
           log(`[00:11] ✓ SSH 安全隧道握手成功 (目标节点: ${server.name} [${server.ip}])`, 'success', 'SSH')
 
           try {
-            const artifactDir = path.join(process.cwd(), '.cicd_artifacts', project.id)
-            const isDockerMode =
-              project.artifactType === 'docker' ||
-              (project.artifactType !== 'tar' &&
-                (project.runtime === 'Docker' ||
-                  (project.buildCommand && project.buildCommand.toLowerCase().includes('docker build'))))
-
-            if (isDockerMode) {
+            if (project.deployTargetMode === 'native') {
               // =============================================================
-              // 机制一：Docker 镜像分发抽象层 (策略工厂自动派发 Save/Load 或 Registry)
+              // 原生目标机部署机制 (tar -czf -> SFTP -> tar -xzf -> 原生启动)
+              // =============================================================
+              const artifactDir = path.join(process.cwd(), '.cicd_artifacts', project.id)
+              if (!fs.existsSync(artifactDir)) {
+                fs.mkdirSync(artifactDir, { recursive: true })
+              }
+
+              const archiveName = `${deploymentId}_app.tar.gz`
+              const localArchivePath = path.join(artifactDir, archiveName)
+
+              setStatus('running', '产物打包')
+              log(`[00:11] 识别为【原生宿主机部署模式 (Native)】，正在通过 [tar] 打包应用产物 (排除 .git)...`, 'info', 'TAR_PACKAGE')
+              await this.packageTarArtifact(workspaceDir, localArchivePath)
+
+              const stat = fs.statSync(localArchivePath)
+              const sizeStr =
+                stat.size > 1024 * 1024
+                  ? `${(stat.size / (1024 * 1024)).toFixed(2)} MB`
+                  : `${(stat.size / 1024).toFixed(1)} KB`
+              log(`[00:12] ✓ 原生产物打包完成: ${archiveName} (${sizeStr})`, 'success', 'TAR_PACKAGE')
+
+              if (signal.aborted) {
+                cleanup()
+                return reject(new Error('部署已手动中止'))
+              }
+
+              // SFTP 远程分发
+              setStatus('running', '产物分发')
+              log(`[00:12] 正在建立 SFTP 文件传输会话，准备分发产物至 ${server.ip}...`, 'info', 'TAR_TRANSFER')
+
+              const sftp = await new Promise<any>((resolveSftp, rejectSftp) => {
+                conn.sftp((err, sftpSession) => {
+                  if (err) return rejectSftp(new Error(`SFTP 会话建立失败: ${err.message}`))
+                  resolveSftp(sftpSession)
+                })
+              })
+
+              const remoteTempArchive = `/tmp/cicd_deploy_${deploymentId}.tar.gz`
+              log(`[00:13] 正在通过 SFTP 安全通道上传产物至目标主机临时目录: ${remoteTempArchive}...`, 'info', 'TAR_TRANSFER')
+
+              await new Promise<void>((resolvePut, rejectPut) => {
+                sftp.fastPut(localArchivePath, remoteTempArchive, (putErr: any) => {
+                  if (putErr) return rejectPut(new Error(`SFTP 产物传输中断: ${putErr.message}`))
+                  resolvePut()
+                })
+              })
+              log(`[00:13] ✓ SFTP 产物上传完成，正在远程解压同步至部署目录: ${project.deployPath}...`, 'success', 'TAR_TRANSFER')
+
+              if (signal.aborted) {
+                cleanup()
+                return reject(new Error('部署已手动中止'))
+              }
+
+              // 目标服务器解压与目录同步
+              setStatus('running', '解压部署')
+              const unpackCmd = `mkdir -p "${project.deployPath}" && tar -xzf "${remoteTempArchive}" -C "${project.deployPath}" && rm -f "${remoteTempArchive}"`
+
+              await new Promise<void>((resolveUnpack, rejectUnpack) => {
+                conn.exec(wrapSshCommand(unpackCmd), (err, stream) => {
+                  if (err) return rejectUnpack(err)
+                  let remoteErr = ''
+                  stream.stderr.on('data', (d: Buffer) => {
+                    remoteErr += d.toString()
+                  })
+                  stream.resume()
+                  stream.on('close', (code: number) => {
+                    if (code === 0) {
+                      resolveUnpack()
+                    } else {
+                      if (remoteErr.includes('Permission denied')) {
+                        rejectUnpack(
+                          new Error(
+                            `目标服务器部署路径创建或解压失败 (权限不足): ${remoteErr.trim()}。\n提示：当前 SSH 登录用户【${server.user}】对该目录无写权限，建议将部署路径设置为用户家目录下（例如 ~/apps/${project.name}），或提前在服务器执行 sudo chown 为其授权。`
+                          )
+                        )
+                      } else {
+                        rejectUnpack(new Error(`远程产物解压部署返回退出码 ${code}: ${remoteErr.trim() || '未知异常'}`))
+                      }
+                    }
+                  })
+                })
+              })
+
+              log(`[00:14] ✓ 原生产物已成功在远程主机就绪，目标部署目录同步完成`, 'success', 'TAR_UNPACK')
+
+              if (signal.aborted) {
+                cleanup()
+                return reject(new Error('部署已手动中止'))
+              }
+
+              // 原生服务进程启动 / 重载
+              if (project.startCommand && project.startCommand.trim()) {
+                setStatus('running', '服务启动')
+                let envPrefix = `export PORT=${project.port || 3000}`
+                if (project.envVars && project.envVars.length > 0) {
+                  const envExports = project.envVars
+                    .map((e) => `export ${e.key}="${e.value.replace(/"/g, '\\"')}"`)
+                    .join(' && ')
+                  envPrefix += ` && ${envExports}`
+                }
+                const remoteStartCmd = `cd "${project.deployPath}" && ${envPrefix} && ${project.startCommand}`
+                log(`[00:15] 远程主机目标目录执行原生启动指令: ${project.startCommand}`, 'info', 'STARTUP')
+
+                await new Promise<void>((resolveStart, rejectStart) => {
+                  conn.exec(wrapSshCommand(remoteStartCmd), (err, stream) => {
+                    if (err) return rejectStart(err)
+
+                    stream
+                      .on('close', (code: number) => {
+                        if (code === 0) {
+                          resolveStart()
+                        } else {
+                          rejectStart(new Error(`远程原生服务启动命令返回退出码: ${code}`))
+                        }
+                      })
+                      .on('data', (data: Buffer) => {
+                        const text = data.toString('utf-8').trim()
+                        if (text) {
+                          text.split('\n').forEach((line) => log(`[remote] ${line}`, 'info', 'STARTUP'))
+                        }
+                      })
+                      .stderr.on('data', (data: Buffer) => {
+                        const text = data.toString('utf-8').trim()
+                        if (text) {
+                          text.split('\n').forEach((line) => log(`[remote-err] ${line}`, 'warning', 'STARTUP'))
+                        }
+                      })
+                  })
+                })
+
+                log(`[00:16] ✓ 原生服务启动命令执行完毕`, 'success', 'STARTUP')
+              } else {
+                log(`[00:14] 未配置启动命令，原生产物远程解压即为部署完成`, 'info', 'STARTUP')
+              }
+
+              // 清理本地临时打包归档
+              try {
+                if (fs.existsSync(localArchivePath)) {
+                  fs.unlinkSync(localArchivePath)
+                }
+              } catch {}
+
+              cleanup()
+              resolve()
+            } else {
+              // =============================================================
+              // Docker 镜像分发抽象层 (策略工厂自动派发 Save/Load 或 Registry)
               // =============================================================
               const imageTag = this.extractDockerImageTag(project.buildCommand, project.name)
               const settings = getSettings()
               const distributor = DockerDistributorFactory.getDistributor(project, settings)
 
               log(
-                `[00:11] 识别为【Docker 镜像分发模式】，版本标签: [${versionTag || 'latest'}]，策略引擎派发: 【${
+                `[00:11] 识别为【Docker 容器化镜像交付】，版本标签: [${versionTag || 'latest'}]，策略引擎派发: 【${
                   distributor.mode === 'registry'
                     ? '企业级镜像仓库 (docker push/pull)'
                     : 'SFTP 离线直连 (docker save/load)'
@@ -1109,126 +1277,10 @@ class PipelineManager {
               } else {
                 log(`[00:15] 未配置容器启动命令，镜像分发载入即为完成`, 'info', 'STARTUP')
               }
-            } else {
-              // =============================================================
-              // 机制二：常规文件/代码包分发机制 (tar -czf -> SFTP -> tar -xzf)
-              // =============================================================
-              const archiveName = `${deploymentId}_app.tar.gz`
-              const localArchivePath = path.join(artifactDir, archiveName)
 
-              setStatus('running', '产物打包')
-              log(`[00:11] 识别为【常规文件包分发模式】，正在通过 [tar] 打包应用文件 (排除 .git)...`, 'info', 'TAR_PACKAGE')
-              await this.packageTarArtifact(workspaceDir, localArchivePath)
-
-              const stat = fs.statSync(localArchivePath)
-              const sizeStr =
-                stat.size > 1024 * 1024
-                  ? `${(stat.size / (1024 * 1024)).toFixed(2)} MB`
-                  : `${(stat.size / 1024).toFixed(1)} KB`
-              log(`[00:12] ✓ 交付产物打包完成: ${archiveName} (${sizeStr})`, 'success', 'TAR_PACKAGE')
-
-              if (signal.aborted) {
-                cleanup()
-                return reject(new Error('部署已手动中止'))
-              }
-
-              // SFTP 远程分发
-              setStatus('running', '产物分发')
-              log(`[00:12] 正在建立 SFTP 文件传输会话，准备分发产物至 ${server.ip}...`, 'info', 'TAR_TRANSFER')
-
-              const sftp = await new Promise<any>((resolveSftp, rejectSftp) => {
-                conn.sftp((err, sftpSession) => {
-                  if (err) return rejectSftp(new Error(`SFTP 会话建立失败: ${err.message}`))
-                  resolveSftp(sftpSession)
-                })
-              })
-
-              const remoteTempArchive = `/tmp/cicd_deploy_${deploymentId}.tar.gz`
-              log(`[00:13] 正在通过 SFTP 安全通道上传产物至目标主机临时目录...`, 'info', 'TAR_TRANSFER')
-
-              await new Promise<void>((resolvePut, rejectPut) => {
-                sftp.fastPut(localArchivePath, remoteTempArchive, (putErr: any) => {
-                  if (putErr) return rejectPut(new Error(`SFTP 产物传输中断: ${putErr.message}`))
-                  resolvePut()
-                })
-              })
-              log(`[00:13] ✓ SFTP 产物上传完成，正在远程解压同步至部署目录: ${project.deployPath}...`, 'success', 'TAR_TRANSFER')
-
-              if (signal.aborted) {
-                cleanup()
-                return reject(new Error('部署已手动中止'))
-              }
-
-              // 目标服务器解压与目录同步
-              setStatus('running', '解压部署')
-              const unpackCmd = `mkdir -p "${project.deployPath}" && tar -xzf "${remoteTempArchive}" -C "${project.deployPath}" && rm -f "${remoteTempArchive}"`
-
-              await new Promise<void>((resolveUnpack, rejectUnpack) => {
-                conn.exec(wrapSshCommand(unpackCmd), (err, stream) => {
-                  if (err) return rejectUnpack(err)
-                  let remoteErr = ''
-                  stream.stderr.on('data', (d: Buffer) => {
-                    remoteErr += d.toString()
-                  })
-                  stream.resume()
-                  let capturedExitCode: number | null | undefined = undefined
-                  stream.on('exit', (c: any) => {
-                    if (typeof c === 'number') capturedExitCode = c
-                  })
-                  stream.on('close', (code: number) => {
-                    const finalCode = typeof code === 'number' ? code : (typeof capturedExitCode === 'number' ? capturedExitCode : undefined)
-                    if (finalCode === 0 || (finalCode === undefined && !remoteErr.trim())) {
-                      resolveUnpack()
-                    } else {
-                      if (remoteErr.includes('Permission denied')) {
-                        rejectUnpack(
-                          new Error(
-                            `目标服务器部署路径创建或解压失败 (权限不足): ${remoteErr.trim()}。\n提示：当前 SSH 登录用户【${server.user}】对该目录无写权限，建议将部署路径设置为用户家目录下（例如 ~/apps/${project.name}），或提前在服务器执行 sudo chown 为其授权。`
-                          )
-                        )
-                      } else {
-                        rejectUnpack(new Error(`远程产物解压部署返回退出码 ${finalCode ?? '未知'}: ${remoteErr.trim() || '未知异常'}`))
-                      }
-                    }
-                  })
-                })
-              })
-
-              log(`[00:14] ✓ 交付产物已成功在远程主机就绪，目标部署目录同步完成`, 'success', 'TAR_UNPACK')
-
-              if (signal.aborted) {
-                cleanup()
-                return reject(new Error('部署已手动中止'))
-              }
-
-              // 服务进程启动 / 重载
-              if (project.startCommand && project.startCommand.trim()) {
-                setStatus('running', '服务启动')
-                const containerName = this.extractDockerContainerName(project.startCommand)
-                if (containerName) {
-                  log(`[00:15] 正在检查目标主机同名 Docker 容器 [${containerName}]...`, 'info', 'STARTUP')
-                  await this.cleanupRemoteDockerContainer(conn, containerName, log)
-                }
-
-                const remoteStartCmd = `cd "${project.deployPath}" && ${project.startCommand}`
-                log(`[00:15] 远程执行启动指令: ${project.startCommand}`, 'info', 'STARTUP')
-
-                await this.executeRemoteCommandWithRetry(
-                  conn,
-                  remoteStartCmd,
-                  containerName,
-                  log,
-                  'STARTUP'
-                )
-
-                log(`[00:16] ✓ 远程服务启动命令执行完毕`, 'success', 'STARTUP')
-              } else {
-                log(`[00:14] 未配置启动命令，交付产物远程同步即为部署完成`, 'info', 'STARTUP')
-              }
+              cleanup()
+              resolve()
             }
-
-            cleanup()
-            resolve()
           } catch (deployErr: any) {
             cleanup()
             reject(deployErr)
@@ -1361,13 +1413,16 @@ class PipelineManager {
       lastCommitMessage: deployment.commitMessage,
     })
 
-    const isDockerSimMode =
-      project.artifactType === 'docker' ||
-      (project.artifactType !== 'tar' &&
-        (project.runtime === 'Docker' ||
-          (project.buildCommand && project.buildCommand.toLowerCase().includes('docker build'))))
+    const isNativeSim = project.deployTargetMode === 'native'
 
-    if (isDockerSimMode) {
+    if (isNativeSim) {
+      const plugin = getRuntime(project.runtime)
+      log(
+        `[00:02] 【原生部署模式 (Native)】目标载体: 宿主机系统进程 (技术栈: ${project.runtime || plugin?.name || '通用原生'} | 托管方式: ${plugin?.nativeProcessManager || '原生进程'})`,
+        'info',
+        'GIT_CLONE'
+      )
+    } else {
       const versionTag =
         deployment.triggerType === 'rollback' && deployment.versionTag
           ? deployment.versionTag
@@ -1388,7 +1443,7 @@ class PipelineManager {
         )
       } else {
         log(
-          `[00:02] 【Docker 版本化管理 (方案B)】自动分配版本标签: [${versionTag}] (基于时间戳 + Git Hash: ${deployment.commitHash || 'auto'})`,
+          `[00:02] 【Docker 容器版本管理】自动分配版本标签: [${versionTag}] (基于时间戳 + Git Hash: ${deployment.commitHash || 'auto'})`,
           'success',
           'GIT_CLONE'
         )
@@ -1397,34 +1452,52 @@ class PipelineManager {
 
     if (abortController.signal.aborted) return
 
-    // Step 2: Install Dependencies
-    setStatus('running', '安装依赖')
-    log(`[00:03] 执行依赖安装命令: ${project.installCommand || 'npm install'}`, 'info', 'DEPENDENCY')
-    await this.sleep(1800, abortController.signal)
-    log(`[00:05] ✓ 依赖安装完成，lockfile 校验通过`, 'success', 'DEPENDENCY')
+    // Step 2: Install Dependencies / Preflight
+    if (project.installCommand && project.installCommand.trim()) {
+      setStatus('running', '依赖检查')
+      log(`[00:03] 执行依赖预检/安装命令: ${project.installCommand}`, 'info', 'DEPENDENCY')
+      await this.sleep(1800, abortController.signal)
+      log(`[00:05] ✓ 依赖检查完成，lockfile 校验通过`, 'success', 'DEPENDENCY')
+    }
 
     if (abortController.signal.aborted) return
 
     // Step 3: Build Application
     setStatus('running', '编译构建')
-    log(`[00:05] 开始执行编译构建: ${project.buildCommand || 'npm run build'}`, 'info', 'BUILD')
-    if (project.envVars && project.envVars.length > 0) {
-      log(`[00:06] 注入环境变量: ${project.envVars.map((e) => `${e.key}=${e.isSecret ? '******' : e.value}`).join(', ')}`, 'info', 'BUILD')
-    }
-    if (isDockerSimMode) {
+    if (isNativeSim) {
+      log(`[00:05] 开始执行原生应用编译构建: ${project.buildCommand || 'npm run build'}`, 'info', 'BUILD')
+      if (project.envVars && project.envVars.length > 0) {
+        log(`[00:06] 注入环境变量: ${project.envVars.map((e) => `${e.key}=${e.isSecret ? '******' : e.value}`).join(', ')}`, 'info', 'BUILD')
+      }
+      await this.sleep(2000, abortController.signal)
+      log(`[00:07] ✓ 原生应用编译产物构建就绪 (产物大小约 4.8MB)`, 'success', 'BUILD')
+    } else {
+      log(`[00:05] 开始执行容器化镜像构建: ${project.buildCommand || 'docker build -t app:latest .'}`, 'info', 'BUILD')
+      if (project.envVars && project.envVars.length > 0) {
+        log(`[00:06] 注入环境变量: ${project.envVars.map((e) => `${e.key}=${e.isSecret ? '******' : e.value}`).join(', ')}`, 'info', 'BUILD')
+      }
       log(`[00:06] ✓ 校验项目根目录规范: 已识别根目录下标准 Dockerfile 容器化镜像构建文件`, 'success', 'BUILD')
       if (deployment.versionTag) {
         const baseName = this.extractDockerBaseImageName(project.buildCommand || 'docker build -t app:latest .', project.name)
         log(`[00:06] 【Docker 版本化构建】生成不可变镜像: [${baseName}:${deployment.versionTag}] 及运行别名: [${baseName}:latest]`, 'info', 'BUILD')
       }
+      await this.sleep(2200, abortController.signal)
+      log(`[00:07] ✓ Docker 容器镜像构建就绪 (镜像大小约 128MB)`, 'success', 'BUILD')
     }
-    await this.sleep(2200, abortController.signal)
-    log(`[00:07] ✓ 编译产物打包就绪，生成优化产物包 (大小约 3.2MB)`, 'success', 'BUILD')
 
     if (abortController.signal.aborted) return
 
     // Step 4: Transfer & Deploy
-    if (isDockerSimMode) {
+    if (isNativeSim) {
+      setStatus('running', '产物打包')
+      log(`[00:08] 【原生模式】执行 [tar] 打包应用构建交付产物 (排除 .git)...`, 'info', 'TAR_PACKAGE')
+      await this.sleep(1200, abortController.signal)
+      setStatus('running', '产物分发')
+      log(`[00:09] 正在通过 SFTP 同步构建产物至目标主机 ${project.serverIp}:${project.deployPath}...`, 'info', 'TAR_TRANSFER')
+      await this.sleep(1400, abortController.signal)
+      setStatus('running', '解压部署')
+      log(`[00:10] ✓ 目标主机已解压产物至部署目录: ${project.deployPath}`, 'success', 'TAR_UNPACK')
+    } else {
       const tag = this.extractDockerImageTag(project.buildCommand || 'docker build -t app:latest .', project.name)
       const settings = getSettings()
       const distributor = DockerDistributorFactory.getDistributor(project, settings)
@@ -1449,30 +1522,29 @@ class PipelineManager {
         setStatus,
         settings,
       })
-    } else {
-      setStatus('running', '产物打包')
-      log(`[00:08] 【文件模式】执行 [tar] 打包应用构建交付产物 (排除 .git)...`, 'info', 'TAR_PACKAGE')
-      await this.sleep(1200, abortController.signal)
-      setStatus('running', '产物分发')
-      log(`[00:09] 正在通过 SFTP 同步构建产物至目标主机 ${project.serverIp}:${project.deployPath}...`, 'info', 'TAR_TRANSFER')
-      await this.sleep(1400, abortController.signal)
-      setStatus('running', '解压部署')
-      log(`[00:10] ✓ 目标主机已解压产物至部署目录: ${project.deployPath}`, 'success', 'TAR_UNPACK')
     }
 
     if (abortController.signal.aborted) return
 
     // Step 5: Start / Reload Process
     setStatus('running', '服务启动')
-    const simContainerName = this.extractDockerContainerName(project.startCommand)
-    if (simContainerName) {
-      log(`[00:10] 检测到 Docker 容器命名 [${simContainerName}]，正在平滑停止并清理已存在同名旧容器...`, 'info', 'STARTUP')
-      await this.sleep(800, abortController.signal)
-      log(`[00:10] ✓ 已安全清理旧容器 [${simContainerName}]，准备启动新版本容器`, 'success', 'STARTUP')
+    if (isNativeSim) {
+      const plugin = getRuntime(project.runtime)
+      const procManager = plugin?.nativeProcessManager || '原生系统进程'
+      log(`[00:10] SSH 远程执行原生启动指令: ${project.startCommand || 'npm start'}`, 'info', 'STARTUP')
+      await this.sleep(1400, abortController.signal)
+      log(`[00:11] ✓ 原生服务进程重载成功 (${procManager}已托管)，监听端口 :${project.port}`, 'success', 'STARTUP')
+    } else {
+      const simContainerName = this.extractDockerContainerName(project.startCommand)
+      if (simContainerName) {
+        log(`[00:10] 检测到 Docker 容器命名 [${simContainerName}]，正在平滑停止并清理已存在同名旧容器...`, 'info', 'STARTUP')
+        await this.sleep(800, abortController.signal)
+        log(`[00:10] ✓ 已安全清理旧容器 [${simContainerName}]，准备启动新版本容器`, 'success', 'STARTUP')
+      }
+      log(`[00:10] SSH 远程执行启动指令: ${project.startCommand || 'npm start'}`, 'info', 'STARTUP')
+      await this.sleep(1400, abortController.signal)
+      log(`[00:11] ✓ 服务进程重载成功，PID 已分配，监听端口 :${project.port}`, 'success', 'STARTUP')
     }
-    log(`[00:10] SSH 远程执行启动指令: ${project.startCommand || 'npm start'}`, 'info', 'STARTUP')
-    await this.sleep(1400, abortController.signal)
-    log(`[00:11] ✓ 服务进程重载成功，PID 已分配，监听端口 :${project.port}`, 'success', 'STARTUP')
 
     if (abortController.signal.aborted) return
 
@@ -1502,15 +1574,28 @@ class PipelineManager {
       lastVersionTag: deployment.versionTag,
     })
 
+    createNotification({
+      type: 'deployment',
+      level: 'success',
+      title: `项目【${project.name}】部署成功 (模拟)`,
+      message: `分支 ${project.branch} (${deployment.commitHash?.slice(0, 7) || '最新'}) 模拟构建部署完成，耗时 ${durationSeconds} 秒。`,
+      metadata: {
+        projectId: project.id,
+        projectName: project.name,
+        deploymentId,
+        link: 'deployment',
+      },
+    })
+
     this.emit(deploymentId, {
       type: 'status',
       deploymentId,
-      payload: { status: 'success', currentStep: '部署完成', durationSeconds },
+      payload: { status: 'success', currentStep: '部署完成', durationSeconds, startTime: deployment.startTime },
     })
     this.emit(deploymentId, {
       type: 'end',
       deploymentId,
-      payload: { status: 'success' },
+      payload: { status: 'success', durationSeconds },
     })
   }
 

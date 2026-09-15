@@ -151,6 +151,9 @@ export async function POST(
           python3: 'Python 3.10.12',
           gunicorn: '21.2.0',
           dotnet: '8.0.201',
+          go: 'go1.22.1',
+          java: 'openjdk 17.0.10',
+          nginx: 'nginx/1.24.0',
           docker: 'Docker version 25.0.3',
           git: 'git version 2.43.0',
         }

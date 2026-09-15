@@ -1,14 +1,19 @@
 'use client'
 
-import { Sidebar, ViewType } from '@/components/sidebar'
+import { Sidebar, ViewType } from './sidebar'
 import { Button } from '@/components/ui/button'
-import { Plus, Bell, User, Server } from 'lucide-react'
+import { Plus, User, Server, LogOut } from 'lucide-react'
+import { NotificationPopover } from '@/components/notifications/notification-popover'
 
 interface DashboardProps {
   view: ViewType
   onViewChange: (view: ViewType) => void
   onCreateProject: () => void
   onOpenHelp: () => void
+  currentUser?: string
+  onLogout?: () => void
+  onOpenDeployLog?: (deploymentId: string) => void
+  onOpenProjectDetail?: (projectId: string) => void
   children: React.ReactNode
 }
 
@@ -17,6 +22,10 @@ export function Dashboard({
   onViewChange,
   onCreateProject,
   onOpenHelp,
+  currentUser,
+  onLogout,
+  onOpenDeployLog,
+  onOpenProjectDetail,
   children,
 }: DashboardProps) {
   const getHeaderInfo = () => {
@@ -42,7 +51,7 @@ export function Dashboard({
           desc: '平台基础路径、工作空间目录与通知机器人配置',
         }
       default:
-        return { title: 'CI/CD 运维系统', desc: '轻量自研自动化发布平台' }
+        return { title: 'Solo Deck 运维系统', desc: '轻量自研自动化发布平台' }
     }
   }
 
@@ -55,6 +64,8 @@ export function Dashboard({
         currentView={view}
         onViewChange={onViewChange}
         onOpenHelp={onOpenHelp}
+        currentUser={currentUser}
+        onLogout={onLogout}
       />
 
       {/* Main Content */}
@@ -81,18 +92,33 @@ export function Dashboard({
                 </Button>
               )}
 
-              <button
-                className="p-2 rounded-lg hover:bg-muted text-muted-foreground hover:text-foreground transition-colors relative"
-                title="系统通知"
-              >
-                <Bell className="size-4.5" />
-                <span className="absolute top-1.5 right-1.5 size-2 bg-primary rounded-full" />
-              </button>
+              <NotificationPopover
+                onNavigateView={onViewChange}
+                onOpenDeployLog={onOpenDeployLog}
+                onOpenProjectDetail={onOpenProjectDetail}
+              />
 
               <div className="flex items-center gap-2 pl-3 border-l border-border">
-                <div className="size-8 rounded-full bg-primary/20 text-primary flex items-center justify-center text-xs font-bold border border-primary/30">
-                  运维
+                <div className="size-8 rounded-full bg-primary/20 text-primary flex items-center justify-center text-xs font-bold border border-primary/30 uppercase">
+                  {currentUser ? currentUser.slice(0, 2).toUpperCase() : '运维'}
                 </div>
+                <div className="hidden sm:block text-left leading-tight">
+                  <span className="text-xs font-semibold text-foreground block">
+                    {currentUser || '管理员'}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground block">
+                    已认证
+                  </span>
+                </div>
+                {onLogout && (
+                  <button
+                    onClick={onLogout}
+                    className="p-1.5 rounded-lg hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors ml-1"
+                    title="安全退出登录"
+                  >
+                    <LogOut className="size-4" />
+                  </button>
+                )}
               </div>
             </div>
           </div>

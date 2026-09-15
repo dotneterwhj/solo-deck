@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import {
   X,
   Play,
@@ -23,14 +23,14 @@ import {
   EyeOff,
   Activity,
   Boxes,
-  FolderArchive,
   Tag,
   Sparkles,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Project, Deployment, EnvVariable, ArtifactType, DockerDeliveryMode } from '@/lib/types'
-import { DockerfileGuideModal } from '@/components/dockerfile-guide-modal'
+import { Project, Deployment, EnvVariable, ArtifactType, DockerDeliveryMode, DeployTargetMode } from '@/lib/types'
+import { DockerfileGuideModal } from '@/components/guides/dockerfile-guide-modal'
+import { getRuntime, getAllRuntimes, toSafeSlug } from '@/lib/runtimes'
 
 interface ProjectDetailModalProps {
   project: Project
@@ -38,6 +38,7 @@ interface ProjectDetailModalProps {
   onDeploy: (projectId: string) => void
   onOpenDeploymentLog: (deploymentId: string) => void
   onProjectUpdated: () => void
+  onClone?: (project: Project) => void
 }
 
 type TabType = 'overview' | 'pipeline' | 'env' | 'webhook' | 'history'
@@ -48,6 +49,7 @@ export function ProjectDetailModal({
   onDeploy,
   onOpenDeploymentLog,
   onProjectUpdated,
+  onClone,
 }: ProjectDetailModalProps) {
   const [activeTab, setActiveTab] = useState<TabType>('overview')
   const [deployments, setDeployments] = useState<Deployment[]>([])
@@ -69,12 +71,49 @@ export function ProjectDetailModal({
     port: project.port,
     healthCheckUrl: project.healthCheckUrl || '',
     runnerMode: project.runnerMode,
+    deployTargetMode: (project.deployTargetMode || 'docker') as DeployTargetMode,
     artifactType: (project.artifactType || 'auto') as ArtifactType,
     dockerDeliveryMode: (project.dockerDeliveryMode || 'auto') as DockerDeliveryMode,
     dockerRegistry: project.dockerRegistry || { registryUrl: '', namespace: '' },
   })
   const [saving, setSaving] = useState(false)
   const [saveSuccess, setSaveSuccess] = useState(false)
+
+  const currentPlugin = useMemo(() => {
+    return getRuntime(project.runtime) || getAllRuntimes()[0]
+  }, [project.runtime])
+
+  const handleDeployTargetModeChange = (mode: DeployTargetMode) => {
+    const isDocker = mode === 'docker'
+    const slug = toSafeSlug(formData.name)
+    const port = Number(formData.port) || currentPlugin.defaultPort
+    let newBuild = formData.buildCommand
+    let newStart = formData.startCommand
+
+    if (isDocker) {
+      if (!newBuild || !newBuild.includes('docker build')) {
+        newBuild = currentPlugin.getBuildCommand(slug, { mode: 'docker' })
+      }
+      if (!newStart || !newStart.includes('docker run')) {
+        newStart = currentPlugin.getStartCommand(slug, port, { mode: 'docker' })
+      }
+    } else {
+      if (!newBuild || newBuild.includes('docker build')) {
+        newBuild = currentPlugin.getBuildCommand(slug, { mode: 'native' })
+      }
+      if (!newStart || newStart.includes('docker run')) {
+        newStart = currentPlugin.getStartCommand(slug, port, { mode: 'native' })
+      }
+    }
+
+    setFormData((prev) => ({
+      ...prev,
+      deployTargetMode: mode,
+      artifactType: isDocker ? 'docker' : 'tar',
+      buildCommand: newBuild,
+      startCommand: newStart,
+    }))
+  }
 
   // Env vars
   const [envVars, setEnvVars] = useState<EnvVariable[]>(project.envVars || [])
@@ -196,10 +235,22 @@ export function ProjectDetailModal({
           </div>
 
           <div className="flex items-center gap-2">
+            {onClone && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => onClone(project)}
+                className="gap-1.5 text-xs h-9 text-muted-foreground hover:text-foreground"
+                title="克隆此项目至其他服务器"
+              >
+                <Copy className="size-3.5" />
+                克隆项目
+              </Button>
+            )}
             <Button
               size="sm"
               onClick={() => onDeploy(project.id)}
-              className="gap-1.5"
+              className="gap-1.5 text-xs h-9 font-semibold"
             >
               <Play className="size-4" />
               立即部署
@@ -362,187 +413,170 @@ export function ProjectDetailModal({
                   />
                 </div>
 
-                {/* Stage 3: Artifact Distribution */}
+                {/* Stage 3: Docker Delivery Mechanism */}
                 <div className="p-4 rounded-lg border border-border bg-card space-y-3">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
-                      阶段 3: 产物打包与远程分发策略 (Artifact Distribution)
+                    <span className="text-xs font-semibold text-muted-foreground">
+                      阶段 3: 部署载体与交付策略 (Deployment Mode & Delivery)
                     </span>
-                    <span className="text-xs font-medium text-muted-foreground">
-                      {formData.artifactType === 'docker' ||
-                      (formData.artifactType === 'auto' &&
-                        (project.runtime === 'Docker' ||
-                          formData.buildCommand.toLowerCase().includes('docker build')))
-                        ? '🎯 当前判定: Docker 镜像机制'
-                        : '🎯 当前判定: Tar 归档机制'}
+                    <span className="text-xs font-medium text-primary">
+                      {formData.deployTargetMode === 'native' ? '🚀 原生进程模式' : '🐳 Docker 容器模式'}
                     </span>
                   </div>
 
-                  <div className="grid grid-cols-3 gap-2.5">
+                  {/* Mode switcher */}
+                  <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
-                      onClick={() => setFormData({ ...formData, artifactType: 'auto' })}
+                      onClick={() => handleDeployTargetModeChange('docker')}
                       className={`p-2.5 rounded-lg border text-left transition-all ${
-                        formData.artifactType === 'auto'
-                          ? 'border-primary bg-primary/5 text-primary'
-                          : 'border-border hover:border-primary/40 text-muted-foreground'
+                        formData.deployTargetMode === 'docker'
+                          ? 'border-blue-500 bg-blue-500/15 text-blue-300 font-semibold'
+                          : 'border-border/80 hover:border-blue-500/40 text-muted-foreground'
                       }`}
                     >
-                      <p className="text-xs font-semibold flex items-center gap-1.5">
-                        <span className="size-2 rounded-full bg-primary" />
-                        自动适配 (推荐)
-                      </p>
-                      <p className="text-[10px] text-muted-foreground mt-1 leading-snug">
-                        根据运行时或 build 指令智能选用机制
-                      </p>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setFormData({ ...formData, artifactType: 'docker' })}
-                      className={`p-2.5 rounded-lg border text-left transition-all ${
-                        formData.artifactType === 'docker'
-                          ? 'border-blue-500 bg-blue-500/10 text-blue-400'
-                          : 'border-border hover:border-blue-500/40 text-muted-foreground'
-                      }`}
-                    >
-                      <p className="text-xs font-semibold flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold">
                         <Boxes className="size-3.5 text-blue-400" />
-                        Docker 镜像机制
-                      </p>
-                      <p className="text-[10px] text-muted-foreground mt-1 leading-snug">
-                        docker save ➔ SFTP ➔ docker load
-                      </p>
+                        Docker 容器部署
+                      </div>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">多阶段镜像封装，隔离环境</p>
                     </button>
 
                     <button
                       type="button"
-                      onClick={() => setFormData({ ...formData, artifactType: 'tar' })}
+                      onClick={() => handleDeployTargetModeChange('native')}
                       className={`p-2.5 rounded-lg border text-left transition-all ${
-                        formData.artifactType === 'tar'
-                          ? 'border-amber-500 bg-amber-500/10 text-amber-400'
-                          : 'border-border hover:border-amber-500/40 text-muted-foreground'
+                        formData.deployTargetMode === 'native'
+                          ? 'border-amber-500 bg-amber-500/15 text-amber-300 font-semibold'
+                          : 'border-border/80 hover:border-amber-500/40 text-muted-foreground'
                       }`}
                     >
-                      <p className="text-xs font-semibold flex items-center gap-1.5">
-                        <FolderArchive className="size-3.5 text-amber-400" />
-                        文件归档机制
-                      </p>
-                      <p className="text-[10px] text-muted-foreground mt-1 leading-snug">
-                        tar -czf ➔ SFTP ➔ tar -xzf
-                      </p>
+                      <div className="flex items-center gap-1.5 text-xs font-semibold">
+                        <Terminal className="size-3.5 text-amber-500" />
+                        原生部署 (宿主机进程)
+                      </div>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">{currentPlugin.nativeProcessManager || '宿主机原生托管'}</p>
                     </button>
                   </div>
 
-                  {/* Docker Sub-mode Options */}
-                  {(formData.artifactType === 'docker' ||
-                    (formData.artifactType === 'auto' &&
-                      (project.runtime === 'Docker' ||
-                        formData.buildCommand.toLowerCase().includes('docker build')))) && (
-                    <div className="p-3.5 rounded-lg border border-blue-500/30 bg-blue-500/5 space-y-3">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
-                          <Boxes className="size-3.5 text-blue-400" />
-                          Docker 传输通道策略
-                        </span>
-                        <span className="text-[11px] text-muted-foreground">
-                          {formData.dockerDeliveryMode === 'auto'
-                            ? '当前：自动跟随全局策略'
-                            : formData.dockerDeliveryMode === 'registry'
-                              ? '当前：镜像仓库模式'
-                              : '当前：SFTP 离线直连模式'}
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-3 gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setFormData({ ...formData, dockerDeliveryMode: 'auto' })}
-                          className={`p-2 rounded border text-left transition-all ${
-                            formData.dockerDeliveryMode === 'auto'
-                              ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
-                              : 'border-border/80 hover:border-blue-500/40 text-muted-foreground'
-                          }`}
-                        >
-                          <p className="text-xs font-semibold">自动策略 (推荐)</p>
-                          <p className="text-[10px] text-muted-foreground mt-0.5">有 Registry 走仓库，无则直连</p>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => setFormData({ ...formData, dockerDeliveryMode: 'save_load' })}
-                          className={`p-2 rounded border text-left transition-all ${
-                            formData.dockerDeliveryMode === 'save_load'
-                              ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
-                              : 'border-border/80 hover:border-blue-500/40 text-muted-foreground'
-                          }`}
-                        >
-                          <p className="text-xs font-semibold">SFTP 离线直连</p>
-                          <p className="text-[10px] text-muted-foreground mt-0.5">docker save ➔ SFTP ➔ load</p>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => setFormData({ ...formData, dockerDeliveryMode: 'registry' })}
-                          className={`p-2 rounded border text-left transition-all ${
-                            formData.dockerDeliveryMode === 'registry'
-                              ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
-                              : 'border-border/80 hover:border-blue-500/40 text-muted-foreground'
-                          }`}
-                        >
-                          <p className="text-xs font-semibold">企业镜像仓库</p>
-                          <p className="text-[10px] text-muted-foreground mt-0.5">docker push ➔ Registry ➔ pull</p>
-                        </button>
-                      </div>
-
-                      {/* Project-specific Registry override */}
-                      {formData.dockerDeliveryMode === 'registry' && (
-                        <div className="grid grid-cols-2 gap-2.5 pt-2 border-t border-blue-500/20 text-xs">
-                          <div>
-                            <label className="text-[11px] text-muted-foreground">专属 Registry URL (留空继承全局)</label>
-                            <Input
-                              value={formData.dockerRegistry?.registryUrl || ''}
-                              onChange={(e) =>
-                                setFormData({
-                                  ...formData,
-                                  dockerRegistry: {
-                                    ...(formData.dockerRegistry || {}),
-                                    registryUrl: e.target.value,
-                                  },
-                                })
-                              }
-                              placeholder="harbor.example.com"
-                              className="mt-1 font-mono text-xs h-8"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-[11px] text-muted-foreground">专属命名空间 (留空继承全局)</label>
-                            <Input
-                              value={formData.dockerRegistry?.namespace || ''}
-                              onChange={(e) =>
-                                setFormData({
-                                  ...formData,
-                                  dockerRegistry: {
-                                    ...(formData.dockerRegistry || {}),
-                                    namespace: e.target.value,
-                                  },
-                                })
-                              }
-                              placeholder="my-team"
-                              className="mt-1 font-mono text-xs h-8"
-                            />
-                          </div>
-                        </div>
-                      )}
+                  {formData.deployTargetMode === 'native' ? (
+                    <div className="p-3.5 rounded-lg border border-amber-500/30 bg-amber-500/5 space-y-2 text-xs">
+                      <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                        <Terminal className="size-3.5 text-amber-500" />
+                        {currentPlugin.name} 原生分发管道
+                      </span>
+                      <p className="text-[11px] text-muted-foreground leading-relaxed">
+                        本地构建编译完成后，通过系统 tar 将产物打包为压缩包，经 SFTP 安全隧道直传至目标主机目录并解压，最终执行启动命令：
+                        <code className="text-amber-400 font-mono ml-1">{formData.startCommand}</code>
+                      </p>
+                      <p className="text-[11px] text-amber-300/90 flex items-center gap-1 pt-1 border-t border-amber-500/20">
+                        <span>目标主机环境:</span>
+                        <code className="px-1 py-0.5 rounded bg-amber-500/20 font-mono text-[10px] text-amber-300">
+                          {currentPlugin.getRequiredTools('native').join('、') || '基础依赖'}
+                        </code>
+                        <span className="text-muted-foreground">({currentPlugin.nativeRequirementDesc})</span>
+                      </p>
                     </div>
-                  )}
+                  ) : (
+                    <>
+                      <div className="p-3.5 rounded-lg border border-blue-500/30 bg-blue-500/5 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                            <Boxes className="size-3.5 text-blue-400" />
+                            Docker 传输通道策略
+                          </span>
+                          <span className="text-[11px] text-muted-foreground">
+                            {formData.dockerDeliveryMode === 'auto'
+                              ? '当前：自动跟随全局策略'
+                              : formData.dockerDeliveryMode === 'registry'
+                                ? '当前：企业级镜像仓库模式'
+                                : '当前：SFTP 离线直连模式'}
+                          </span>
+                        </div>
 
-                  <div className="p-2.5 rounded-md bg-muted/40 border border-border/70 text-[11px] text-muted-foreground flex items-start gap-2">
-                    {formData.artifactType === 'docker' ||
-                    (formData.artifactType === 'auto' &&
-                      (project.runtime === 'Docker' ||
-                        formData.buildCommand.toLowerCase().includes('docker build'))) ? (
-                      <>
+                        <div className="grid grid-cols-3 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setFormData({ ...formData, dockerDeliveryMode: 'auto', artifactType: 'docker' })}
+                            className={`p-2 rounded border text-left transition-all ${
+                              formData.dockerDeliveryMode === 'auto'
+                                ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
+                                : 'border-border/80 hover:border-blue-500/40 text-muted-foreground'
+                            }`}
+                          >
+                            <p className="text-xs font-semibold">自动策略 (推荐)</p>
+                            <p className="text-[10px] text-muted-foreground mt-0.5">有 Registry 走仓库，无则直连</p>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setFormData({ ...formData, dockerDeliveryMode: 'save_load', artifactType: 'docker' })}
+                            className={`p-2 rounded border text-left transition-all ${
+                              formData.dockerDeliveryMode === 'save_load'
+                                ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
+                                : 'border-border/80 hover:border-blue-500/40 text-muted-foreground'
+                            }`}
+                          >
+                            <p className="text-xs font-semibold">SFTP 离线直连</p>
+                            <p className="text-[10px] text-muted-foreground mt-0.5">docker save ➔ SFTP ➔ load</p>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setFormData({ ...formData, dockerDeliveryMode: 'registry', artifactType: 'docker' })}
+                            className={`p-2 rounded border text-left transition-all ${
+                              formData.dockerDeliveryMode === 'registry'
+                                ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
+                                : 'border-border/80 hover:border-blue-500/40 text-muted-foreground'
+                            }`}
+                          >
+                            <p className="text-xs font-semibold">企业镜像仓库</p>
+                            <p className="text-[10px] text-muted-foreground mt-0.5">docker push ➔ Registry ➔ pull</p>
+                          </button>
+                        </div>
+
+                        {/* Project-specific Registry override */}
+                        {formData.dockerDeliveryMode === 'registry' && (
+                          <div className="grid grid-cols-2 gap-2.5 pt-2 border-t border-blue-500/20 text-xs">
+                            <div>
+                              <label className="text-[11px] text-muted-foreground">专属 Registry URL (留空继承全局)</label>
+                              <Input
+                                value={formData.dockerRegistry?.registryUrl || ''}
+                                onChange={(e) =>
+                                  setFormData({
+                                    ...formData,
+                                    dockerRegistry: {
+                                      ...(formData.dockerRegistry || {}),
+                                      registryUrl: e.target.value,
+                                    },
+                                  })
+                                }
+                                placeholder="harbor.example.com"
+                                className="mt-1 font-mono text-xs h-8"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[11px] text-muted-foreground">专属命名空间 (留空继承全局)</label>
+                              <Input
+                                value={formData.dockerRegistry?.namespace || ''}
+                                onChange={(e) =>
+                                  setFormData({
+                                    ...formData,
+                                    dockerRegistry: {
+                                      ...(formData.dockerRegistry || {}),
+                                      namespace: e.target.value,
+                                    },
+                                  })
+                                }
+                                placeholder="my-team"
+                                className="mt-1 font-mono text-xs h-8"
+                              />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="p-2.5 rounded-md bg-muted/40 border border-border/70 text-[11px] text-muted-foreground flex items-start gap-2">
                         <Boxes className="size-4 text-blue-400 shrink-0 mt-0.5" />
                         <span>
                           {formData.dockerDeliveryMode === 'registry' ? (
@@ -557,23 +591,12 @@ export function ProjectDetailModal({
                             </>
                           )}
                         </span>
-                      </>
-                    ) : (
-                      <>
-                        <FolderArchive className="size-4 text-amber-400 shrink-0 mt-0.5" />
-                        <span>
-                          <strong className="text-foreground">常规文件归档交付流程：</strong>
-                          本地宿主机通过 <code className="text-amber-400">tar -czf</code> 归档代码与编译产物（自动排除 .git 目录），通过 SFTP 上传至目标主机临时目录，远程自动解压至部署目录 <code className="text-amber-400">{formData.deployPath}</code>。
-                        </span>
-                      </>
-                    )}
-                  </div>
+                      </div>
+                    </>
+                  )}
                 </div>
 
-                {(formData.artifactType === 'docker' ||
-                  (formData.artifactType === 'auto' &&
-                    (project.runtime === 'Docker' ||
-                      formData.buildCommand.toLowerCase().includes('docker build')))) && (
+                {formData.deployTargetMode !== 'native' && (
                   <div className="p-3.5 rounded-lg border border-blue-500/30 bg-blue-500/5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
                     <div className="flex items-start gap-2.5">
                       <Boxes className="size-4 text-blue-400 shrink-0 mt-0.5" />
@@ -599,7 +622,7 @@ export function ProjectDetailModal({
                   </div>
                 )}
 
-                <div className="p-4 rounded-lg border border-border bg-card">
+                  <div className="p-4 rounded-lg border border-border bg-card">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
                       阶段 4: 启动/重载进程命令 (Start / Reload)
@@ -609,7 +632,7 @@ export function ProjectDetailModal({
                     value={formData.startCommand}
                     onChange={(e) => setFormData({ ...formData, startCommand: e.target.value })}
                     className="font-mono text-sm"
-                    placeholder="pm2 reload app || pm2 start dist/index.js 或 docker run ..."
+                    placeholder="如: docker run -d ... 或 原生启动命令 (例: pm2 reload / gunicorn / dotnet / ./server)"
                   />
                 </div>
               </div>

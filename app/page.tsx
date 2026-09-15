@@ -1,21 +1,29 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Dashboard } from '@/components/dashboard'
-import { DashboardOverview } from '@/components/dashboard-overview'
-import { ProjectList } from '@/components/project-list'
-import { ServerManagement } from '@/components/server-management'
-import { SystemSettings } from '@/components/system-settings'
-import { NewProjectWizard } from '@/components/new-project-wizard'
-import { DeployModal } from '@/components/deploy-modal'
-import { ProjectDetailModal } from '@/components/project-detail-modal'
-import { HelpModal } from '@/components/help-modal'
-import { PreflightEnvDialog } from '@/components/preflight-env-dialog'
-import { ViewType } from '@/components/sidebar'
+import { useRouter } from 'next/navigation'
+import { Workflow } from 'lucide-react'
+import { Dashboard } from '@/components/layout/dashboard'
+import { ViewType } from '@/components/layout/sidebar'
+import { DashboardOverview } from '@/components/dashboard/dashboard-overview'
+import { ProjectList } from '@/components/projects/project-list'
+import { ProjectDetailModal } from '@/components/projects/project-detail-modal'
+import { CloneProjectModal } from '@/components/projects/clone-project-modal'
+import { NewProjectWizard } from '@/components/projects/new-project-wizard'
+import { DeployModal } from '@/components/deployments/deploy-modal'
+import { ConfirmDeployDialog } from '@/components/deployments/confirm-deploy-dialog'
+import { PreflightEnvDialog } from '@/components/deployments/preflight-env-dialog'
+import { ServerManagement } from '@/components/servers/server-management'
+import { SystemSettings } from '@/components/settings/system-settings'
+import { HelpModal } from '@/components/guides/help-modal'
 import { Project, ServerNode, ServerEnvInfo } from '@/lib/types'
 import { getRequiredEnvKeys } from '@/lib/env-presets'
 
 export default function Page() {
+  const router = useRouter()
+  const [authChecking, setAuthChecking] = useState(true)
+  const [currentUser, setCurrentUser] = useState<string>('admin')
+
   const [view, setView] = useState<ViewType>('dashboard')
   const [projects, setProjects] = useState<Project[]>([])
   const [servers, setServers] = useState<ServerNode[]>([])
@@ -25,7 +33,9 @@ export default function Page() {
   const [showNewProjectWizard, setShowNewProjectWizard] = useState(false)
   const [activeDeployId, setActiveDeployId] = useState<string | null>(null)
   const [activeDetailProject, setActiveDetailProject] = useState<Project | null>(null)
+  const [cloneSourceProject, setCloneSourceProject] = useState<Project | null>(null)
   const [showHelpModal, setShowHelpModal] = useState(false)
+  const [confirmDeployProject, setConfirmDeployProject] = useState<Project | null>(null)
 
   // Pre-flight environment check state
   const [preflightProject, setPreflightProject] = useState<Project | null>(null)
@@ -55,8 +65,37 @@ export default function Page() {
   }
 
   useEffect(() => {
-    loadData()
-  }, [])
+    const checkAuthAndLoad = async () => {
+      try {
+        const resAuth = await fetch('/api/auth/me')
+        if (resAuth.ok) {
+          const authData = await resAuth.json()
+          if (authData.enabled && !authData.authenticated) {
+            router.replace('/login')
+            return
+          }
+          if (authData.user?.username) {
+            setCurrentUser(authData.user.username)
+          }
+        }
+      } catch (err) {
+        console.error('Auth verification failed', err)
+      } finally {
+        setAuthChecking(false)
+      }
+      loadData()
+    }
+
+    checkAuthAndLoad()
+  }, [router])
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' })
+    } finally {
+      router.replace('/login')
+    }
+  }
 
   // Directly start the deployment API
   const startDeployDirectly = async (projectId: string) => {
@@ -102,8 +141,11 @@ export default function Page() {
       return
     }
 
-    // Check required environments for this project runtime
-    const requiredKeys = getRequiredEnvKeys(targetProject.runtime)
+    // Check required environments for this project runtime and deployment target mode
+    const requiredKeys = getRequiredEnvKeys(
+      targetProject.runtime,
+      targetProject.deployTargetMode || 'docker'
+    )
     setIsPreflightChecking(true)
 
     try {
@@ -138,6 +180,23 @@ export default function Page() {
     startDeployDirectly(projectId)
   }
 
+  // User triggers deploy -> show secondary confirmation modal
+  const handleRequestDeploy = (projectId: string) => {
+    const targetProject = projects.find((p) => p.id === projectId)
+    if (targetProject) {
+      setConfirmDeployProject(targetProject)
+    } else {
+      handleDeploy(projectId)
+    }
+  }
+
+  const handleConfirmDeploy = () => {
+    if (!confirmDeployProject) return
+    const pid = confirmDeployProject.id
+    setConfirmDeployProject(null)
+    handleDeploy(pid)
+  }
+
   // Delete project
   const handleDeleteProject = async (projectId: string) => {
     if (!confirm('确定要删除该项目流水线吗？删除后不可恢复。')) return
@@ -162,6 +221,21 @@ export default function Page() {
     setView('list')
   }
 
+  if (authChecking) {
+    return (
+      <div className="min-h-screen w-full flex items-center justify-center bg-[#0d1117] text-foreground">
+        <div className="flex flex-col items-center gap-3">
+          <div className="size-11 rounded-2xl bg-primary/15 text-primary flex items-center justify-center animate-pulse">
+            <Workflow className="size-6" />
+          </div>
+          <span className="text-xs text-muted-foreground animate-pulse font-mono">
+            正在验证系统身份状态...
+          </span>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <>
       <Dashboard
@@ -169,16 +243,28 @@ export default function Page() {
         onViewChange={setView}
         onCreateProject={() => setShowNewProjectWizard(true)}
         onOpenHelp={() => setShowHelpModal(true)}
+        currentUser={currentUser}
+        onLogout={handleLogout}
+        onOpenDeployLog={(depId) => setActiveDeployId(depId)}
+        onOpenProjectDetail={(projectId) => {
+          const p = projects.find((x) => x.id === projectId)
+          if (p) {
+            setActiveDetailProject(p)
+          } else {
+            setView('list')
+          }
+        }}
       >
         {view === 'dashboard' && (
           <DashboardOverview
             projects={projects}
             loading={loadingProjects}
-            onDeploy={(id) => handleDeploy(id)}
+            onDeploy={(id) => handleRequestDeploy(id)}
             onViewDetails={(p) => setActiveDetailProject(p)}
             onDeleteProject={handleDeleteProject}
             onCreateProject={() => setShowNewProjectWizard(true)}
             onOpenDeploymentLog={(depId) => setActiveDeployId(depId)}
+            onCloneProject={(p) => setCloneSourceProject(p)}
           />
         )}
 
@@ -187,9 +273,10 @@ export default function Page() {
             <ProjectList
               projects={projects}
               loading={loadingProjects}
-              onDeploy={(id) => handleDeploy(id)}
+              onDeploy={(id) => handleRequestDeploy(id)}
               onViewDetails={(p) => setActiveDetailProject(p)}
               onDeleteProject={handleDeleteProject}
+              onCloneProject={(p) => setCloneSourceProject(p)}
               onProjectUpdated={(updatedProject) => {
                 setProjects((prev) =>
                   prev.map((p) => (p.id === updatedProject.id ? updatedProject : p))
@@ -213,6 +300,20 @@ export default function Page() {
         />
       )}
 
+      {/* Clone Project Modal */}
+      {cloneSourceProject && (
+        <CloneProjectModal
+          isOpen={!!cloneSourceProject}
+          project={cloneSourceProject}
+          servers={servers}
+          onClose={() => setCloneSourceProject(null)}
+          onSuccess={(newProject) => {
+            setCloneSourceProject(null)
+            loadData()
+          }}
+        />
+      )}
+
       {/* Real-time Streaming Deploy Terminal Modal */}
       {activeDeployId && (
         <DeployModal
@@ -221,7 +322,7 @@ export default function Page() {
             setActiveDeployId(null)
             loadData()
           }}
-          onReDeploy={(id) => handleDeploy(id, true)}
+          onReDeploy={(id) => handleRequestDeploy(id)}
         />
       )}
 
@@ -230,8 +331,12 @@ export default function Page() {
         <ProjectDetailModal
           project={activeDetailProject}
           onClose={() => setActiveDetailProject(null)}
-          onDeploy={(id) => handleDeploy(id)}
+          onDeploy={(id) => handleRequestDeploy(id)}
           onOpenDeploymentLog={(depId) => setActiveDeployId(depId)}
+          onClone={(p) => {
+            setActiveDetailProject(null)
+            setCloneSourceProject(p)
+          }}
           onProjectUpdated={() => {
             loadData()
             fetch(`/api/projects/${activeDetailProject.id}`)
@@ -258,6 +363,16 @@ export default function Page() {
             setPreflightMissingEnvs([])
             startDeployDirectly(pid)
           }}
+        />
+      )}
+
+      {/* Secondary Confirmation Dialog before Deployment */}
+      {confirmDeployProject && (
+        <ConfirmDeployDialog
+          isOpen={!!confirmDeployProject}
+          project={confirmDeployProject}
+          onClose={() => setConfirmDeployProject(null)}
+          onConfirm={handleConfirmDeploy}
         />
       )}
 

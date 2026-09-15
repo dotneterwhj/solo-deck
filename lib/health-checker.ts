@@ -1,5 +1,35 @@
 import { Project, HealthCheckResult } from './types'
-import { readDb, updateProject } from './db'
+import { readDb, updateProject, createNotification } from './db'
+
+function notifyStatusChange(project: Project, newResult: HealthCheckResult) {
+  if (newResult.status === 'unhealthy' && project.healthStatus === 'healthy') {
+    createNotification({
+      type: 'health_check',
+      level: 'error',
+      title: `心跳探针告警: 【${project.name}】健康异常`,
+      message: `探针探测失败: ${newResult.message || '服务未响应'} (地址: ${newResult.url || project.healthCheckUrl})`,
+      metadata: {
+        projectId: project.id,
+        projectName: project.name,
+        url: newResult.url || project.healthCheckUrl,
+        link: 'project',
+      },
+    })
+  } else if (newResult.status === 'healthy' && project.healthStatus === 'unhealthy') {
+    createNotification({
+      type: 'health_check',
+      level: 'success',
+      title: `心跳探针恢复: 【${project.name}】恢复健康`,
+      message: `服务已恢复健康响应 (${newResult.message}，耗时: ${newResult.responseTimeMs}ms)`,
+      metadata: {
+        projectId: project.id,
+        projectName: project.name,
+        url: newResult.url || project.healthCheckUrl,
+        link: 'project',
+      },
+    })
+  }
+}
 
 /**
  * 执行针对单个项目的健康检查 / 心跳探针探测
@@ -35,6 +65,7 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
         url: rawUrl,
         checkedAt: nowIso,
       }
+      notifyStatusChange(project, result)
       updateProject(project.id, {
         healthStatus: 'unhealthy',
         lastHealthCheck: result,
@@ -51,6 +82,7 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
         url: rawUrl,
         checkedAt: nowIso,
       }
+      notifyStatusChange(project, result)
       updateProject(project.id, {
         healthStatus: 'unhealthy',
         lastHealthCheck: result,
@@ -67,6 +99,7 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
       url: rawUrl,
       checkedAt: nowIso,
     }
+    notifyStatusChange(project, result)
     updateProject(project.id, {
       healthStatus: 'healthy',
       lastHealthCheck: result,
@@ -100,6 +133,7 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
         url: rawUrl,
         checkedAt: nowIso,
       }
+      notifyStatusChange(project, result)
       updateProject(project.id, {
         healthStatus: 'healthy',
         lastHealthCheck: result,
@@ -114,6 +148,7 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
         url: rawUrl,
         checkedAt: nowIso,
       }
+      notifyStatusChange(project, result)
       updateProject(project.id, {
         healthStatus: 'unhealthy',
         lastHealthCheck: result,
@@ -135,6 +170,7 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
       url: rawUrl,
       checkedAt: nowIso,
     }
+    notifyStatusChange(project, result)
     updateProject(project.id, {
       healthStatus: 'unhealthy',
       lastHealthCheck: result,

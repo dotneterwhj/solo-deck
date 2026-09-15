@@ -142,6 +142,9 @@ export async function POST(
           python3: { installed: true, version: 'Python 3.10.12' },
           gunicorn: { installed: false },
           dotnet: { installed: false },
+          go: { installed: false },
+          java: { installed: false },
+          nginx: { installed: false },
           docker: { installed: true, version: 'Docker version 25.0.3' },
           git: { installed: true, version: 'git version 2.43.0' },
         }

@@ -19,7 +19,7 @@ import {
   Sparkles,
 } from 'lucide-react'
 import { DeployLogEntry, DeploymentStatus } from '@/lib/types'
-import { DockerfileGuideModal } from '@/components/dockerfile-guide-modal'
+import { DockerfileGuideModal } from '@/components/guides/dockerfile-guide-modal'
 
 interface DeployModalProps {
   deploymentId: string
@@ -47,6 +47,9 @@ export function DeployModal({
   const [showDockerfileModal, setShowDockerfileModal] = useState(false)
 
   const terminalEndRef = useRef<HTMLDivElement>(null)
+  const startTimeRef = useRef<string | null>(null)
+  const statusRef = useRef<DeploymentStatus>('running')
+  const durationRef = useRef<number | null>(null)
 
   // Fetch initial info & setup SSE
   useEffect(() => {
@@ -61,6 +64,7 @@ export function DeployModal({
           setProjectId(dep.projectId)
           setProjectName(dep.projectName)
           setStatus(dep.status)
+          statusRef.current = dep.status
           setCurrentStep(dep.currentStep || '处理中...')
           if (dep.commitHash) setCommitHash(dep.commitHash)
           if (dep.commitMessage) setCommitMessage(dep.commitMessage)
@@ -68,8 +72,18 @@ export function DeployModal({
           if (dep.logs && dep.logs.length > 0) {
             setLogs(dep.logs)
           }
-          if (dep.durationSeconds) {
+          if (dep.startTime) {
+            startTimeRef.current = dep.startTime
+          }
+          if (dep.durationSeconds !== undefined && dep.durationSeconds !== null) {
+            durationRef.current = dep.durationSeconds
             setElapsedSeconds(dep.durationSeconds)
+          } else if (dep.startTime) {
+            const currentElapsed = Math.max(
+              0,
+              Math.floor((Date.now() - new Date(dep.startTime).getTime()) / 1000)
+            )
+            setElapsedSeconds(currentElapsed)
           }
         }
       })
@@ -88,14 +102,46 @@ export function DeployModal({
             return [...prev, data.payload]
           })
         } else if (data.type === 'status') {
-          if (data.payload.status) setStatus(data.payload.status)
+          if (data.payload.startTime) {
+            startTimeRef.current = data.payload.startTime
+          }
+          if (data.payload.status) {
+            statusRef.current = data.payload.status
+            setStatus(data.payload.status)
+          }
           if (data.payload.currentStep) setCurrentStep(data.payload.currentStep)
-          if (data.payload.durationSeconds) setElapsedSeconds(data.payload.durationSeconds)
+          if (data.payload.durationSeconds !== undefined && data.payload.durationSeconds !== null) {
+            durationRef.current = data.payload.durationSeconds
+            setElapsedSeconds(data.payload.durationSeconds)
+          } else if (
+            startTimeRef.current &&
+            (data.payload.status === 'running' || data.payload.status === 'pending')
+          ) {
+            const currentElapsed = Math.max(
+              0,
+              Math.floor((Date.now() - new Date(startTimeRef.current).getTime()) / 1000)
+            )
+            setElapsedSeconds(currentElapsed)
+          }
           if (data.payload.commitHash) setCommitHash(data.payload.commitHash)
           if (data.payload.commitMessage) setCommitMessage(data.payload.commitMessage)
           if (data.payload.versionTag) setVersionTag(data.payload.versionTag)
         } else if (data.type === 'end') {
-          if (data.payload.status) setStatus(data.payload.status)
+          if (data.payload.status) {
+            statusRef.current = data.payload.status
+            setStatus(data.payload.status)
+          }
+          if (data.payload.durationSeconds !== undefined && data.payload.durationSeconds !== null) {
+            durationRef.current = data.payload.durationSeconds
+            setElapsedSeconds(data.payload.durationSeconds)
+          } else if (startTimeRef.current) {
+            const finalElapsed = Math.max(
+              0,
+              Math.floor((Date.now() - new Date(startTimeRef.current).getTime()) / 1000)
+            )
+            durationRef.current = finalElapsed
+            setElapsedSeconds(finalElapsed)
+          }
           eventSource?.close()
         }
       } catch (err) {
@@ -108,14 +154,22 @@ export function DeployModal({
       eventSource?.close()
     }
 
-    // Timer for running deployment
+    // High-precision timer based on server startTime
     timer = setInterval(() => {
-      setStatus((cur) => {
-        if (cur === 'running' || cur === 'pending') {
+      const curStatus = statusRef.current
+      if (curStatus === 'running' || curStatus === 'pending') {
+        if (startTimeRef.current) {
+          const currentElapsed = Math.max(
+            0,
+            Math.floor((Date.now() - new Date(startTimeRef.current).getTime()) / 1000)
+          )
+          setElapsedSeconds(currentElapsed)
+        } else {
           setElapsedSeconds((s) => s + 1)
         }
-        return cur
-      })
+      } else if (durationRef.current !== null) {
+        setElapsedSeconds(durationRef.current)
+      }
     }, 1000)
 
     return () => {
@@ -175,86 +229,108 @@ export function DeployModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
       <div className="w-full max-w-4xl rounded-xl bg-card border border-border shadow-2xl flex flex-col max-h-[90vh] overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-border px-6 py-4 bg-muted/20">
-          <div>
-            <div className="flex items-center gap-2.5">
-              <TerminalIcon className="size-5 text-primary" />
-              <h2 className="text-lg font-bold text-foreground">
-                构建部署控制台 {projectName ? `- ${projectName}` : ''}
-              </h2>
-            </div>
-            <div className="flex items-center gap-3 text-xs text-muted-foreground mt-1">
-              <span>部署批次: <code className="font-mono">{deploymentId}</code></span>
-              <span>•</span>
-              <span className="flex items-center gap-1">
-                <Clock className="size-3.5" />
-                耗时: {formatDuration(elapsedSeconds)}
-              </span>
-              {commitHash && commitHash !== '获取中...' && commitHash !== '-' && (
-                <>
-                  <span>•</span>
-                  <span
-                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-mono bg-muted/80 border border-border text-foreground/90 max-w-[260px] truncate"
-                    title={`Git 提交: ${commitHash} - ${commitMessage || '无提交信息'}`}
-                  >
-                    <GitCommit className="size-3.5 text-primary shrink-0" />
-                    <span className="font-semibold text-primary">{commitHash}</span>
-                    {commitMessage && (
-                      <span className="truncate text-muted-foreground">{commitMessage}</span>
-                    )}
+        <div className="border-b border-border px-6 py-4 bg-muted/20 space-y-3">
+          {/* Top Row: Title, Project Name, Status Badge, Actions */}
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="size-8 rounded-lg bg-primary/10 border border-primary/20 text-primary flex items-center justify-center shrink-0">
+                <TerminalIcon className="size-4" />
+              </div>
+              <div className="flex items-center gap-2.5 min-w-0 flex-wrap">
+                <h2 className="text-base sm:text-lg font-bold text-foreground truncate">
+                  构建部署控制台
+                </h2>
+                {projectName && (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-semibold bg-primary/10 text-primary border border-primary/20 shrink-0">
+                    {projectName}
                   </span>
-                </>
-              )}
-              {versionTag && (
-                <>
-                  <span>•</span>
-                  <span
-                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-mono bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 max-w-[240px] truncate"
-                    title={`Docker 镜像版本标签: ${versionTag}`}
-                  >
-                    <Tag className="size-3.5 text-cyan-400 shrink-0" />
-                    <span className="font-semibold">{versionTag}</span>
-                  </span>
-                </>
-              )}
-              <span>•</span>
-              <span
-                className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-semibold ${status === 'success'
-                    ? 'bg-green-500/10 text-green-500 border border-green-500/30'
-                    : status === 'running' || status === 'pending'
-                      ? 'bg-cyan-500/10 text-cyan-500 border border-cyan-500/30 animate-pulse'
-                      : status === 'cancelled'
-                        ? 'bg-yellow-500/10 text-yellow-500 border border-yellow-500/30'
-                        : 'bg-red-500/10 text-red-500 border border-red-500/30'
+                )}
+                {/* Status Badge */}
+                <span
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold shrink-0 ${
+                    status === 'success'
+                      ? 'bg-green-500/10 text-green-500 border border-green-500/30'
+                      : isExecuting
+                        ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 animate-pulse'
+                        : status === 'cancelled'
+                          ? 'bg-yellow-500/10 text-yellow-500 border border-yellow-500/30'
+                          : 'bg-red-500/10 text-red-500 border border-red-500/30'
                   }`}
+                >
+                  {status === 'success' && <Check className="size-3" />}
+                  {status === 'success' && '部署成功'}
+                  {isExecuting && <span className="size-1.5 rounded-full bg-cyan-400 animate-ping" />}
+                  {isExecuting && `执行中: ${currentStep}`}
+                  {status === 'failed' && <AlertCircle className="size-3" />}
+                  {status === 'failed' && '部署失败'}
+                  {status === 'cancelled' && <StopCircle className="size-3" />}
+                  {status === 'cancelled' && '已中止'}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {isExecuting && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleCancelDeploy}
+                  disabled={cancelling}
+                  className="gap-1.5 h-8 text-xs font-medium"
+                >
+                  <StopCircle className="size-3.5" />
+                  {cancelling ? '正在中止...' : '终止部署'}
+                </Button>
+              )}
+              <button
+                onClick={onClose}
+                className="rounded-lg p-1.5 hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                title="关闭控制台"
               >
-                {status === 'success' && '✓ 部署成功'}
-                {isExecuting && `⏳ 执行中: ${currentStep}`}
-                {status === 'failed' && '✕ 部署失败'}
-                {status === 'cancelled' && '⊘ 已中止'}
-              </span>
+                <X className="size-5" />
+              </button>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            {isExecuting && (
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={handleCancelDeploy}
-                disabled={cancelling}
-                className="gap-1.5 h-8 text-xs"
+          {/* Bottom Row: Metadata info chips with uniform height & baseline */}
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            {/* 部署批次 */}
+            <div className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-md bg-muted/60 border border-border/70 text-[11px] text-foreground/80 font-mono">
+              <span className="text-muted-foreground font-sans">批次:</span>
+              <span className="font-semibold">{deploymentId}</span>
+            </div>
+
+            {/* 耗时 */}
+            <div className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-md bg-muted/60 border border-border/70 text-[11px] text-foreground/80">
+              <Clock className="size-3 text-muted-foreground shrink-0" />
+              <span className="text-muted-foreground">耗时:</span>
+              <span className="font-mono font-semibold text-foreground">{formatDuration(elapsedSeconds)}</span>
+            </div>
+
+            {/* Git Commit */}
+            {commitHash && commitHash !== '获取中...' && commitHash !== '-' && (
+              <div
+                className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-md bg-muted/60 border border-border/70 text-[11px] text-foreground/90 max-w-[280px]"
+                title={`Git 提交: ${commitHash} - ${commitMessage || '无提交信息'}`}
               >
-                <StopCircle className="size-3.5" />
-                {cancelling ? '正在中止...' : '终止部署'}
-              </Button>
+                <GitCommit className="size-3 text-primary shrink-0" />
+                <span className="font-mono font-semibold text-primary">{commitHash}</span>
+                {commitMessage && (
+                  <span className="truncate text-muted-foreground">{commitMessage}</span>
+                )}
+              </div>
             )}
-            <button
-              onClick={onClose}
-              className="rounded-lg p-1.5 hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-            >
-              <X className="size-5" />
-            </button>
+
+            {/* Docker Version Tag */}
+            {versionTag && (
+              <div
+                className="inline-flex items-center gap-1.5 h-6 px-2.5 rounded-md bg-cyan-500/10 border border-cyan-500/30 text-[11px] text-cyan-400 max-w-[240px]"
+                title={`镜像/构建标签: ${versionTag}`}
+              >
+                <Tag className="size-3 text-cyan-400 shrink-0" />
+                <span className="font-mono font-semibold truncate">{versionTag}</span>
+              </div>
+            )}
           </div>
         </div>
 

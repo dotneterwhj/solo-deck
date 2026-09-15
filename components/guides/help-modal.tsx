@@ -14,7 +14,7 @@ import {
   Sparkles,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { DockerfileGuideModal } from '@/components/dockerfile-guide-modal'
+import { DockerfileGuideModal } from './dockerfile-guide-modal'
 
 interface HelpModalProps {
   onClose: () => void
@@ -30,7 +30,7 @@ export function HelpModal({ onClose }: HelpModalProps) {
           <div className="flex items-center gap-2.5">
             <Workflow className="size-5 text-primary" />
             <h3 className="text-base font-bold text-foreground">
-              轻量级自研 CI/CD 平台使用指南
+              Solo Deck 平台使用指南
             </h3>
           </div>
           <button

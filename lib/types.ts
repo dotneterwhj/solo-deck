@@ -1,11 +1,14 @@
-export type RuntimeType =
+export type BuiltinRuntimeType =
   | 'Node.js'
   | 'Python'
   | 'ASP.NET Core'
   | 'Go'
   | 'Java'
-  | 'Docker'
   | 'Static Web'
+
+export type RuntimeType = BuiltinRuntimeType | (string & {})
+
+export type DeployTargetMode = 'docker' | 'native'
 
 export type ProjectStatus = 'active' | 'stopped' | 'error' | 'deploying'
 
@@ -39,6 +42,7 @@ export interface Project {
   gitUsername?: string
   gitToken?: string
   runtime: RuntimeType
+  deployTargetMode?: DeployTargetMode
   artifactType?: ArtifactType
   dockerDeliveryMode?: DockerDeliveryMode
   dockerRegistry?: Partial<DockerRegistryConfig>
@@ -144,6 +148,8 @@ export interface ServerNode {
   tags?: string[]
   description?: string
   installedEnvs?: Record<string, { installed: boolean; version?: string }>
+  hasPassword?: boolean
+  hasPrivateKey?: boolean
 }
 
 export interface SystemSettings {
@@ -158,6 +164,20 @@ export interface SystemSettings {
   dockerRegistry?: DockerRegistryConfig
   enablePeriodicHealthCheck?: boolean
   healthCheckIntervalSeconds?: number
+
+  // 产物与镜像生命周期自动清理配置
+  enableArtifactCleanup?: boolean
+  artifactRetentionDays?: number
+  artifactMaxKeepPerProject?: number
+  artifactCleanupIntervalHours?: number
+
+  enableDockerImagePrune?: boolean
+  dockerPruneDanglingOnly?: boolean
+  dockerPruneRetentionHours?: number
+  dockerPruneIntervalHours?: number
+
+  lastArtifactCleanupAt?: string
+  lastDockerPruneAt?: string
 }
 
 export interface DashboardStats {
@@ -170,3 +190,33 @@ export interface DashboardStats {
   totalServers: number
   onlineServers: number
 }
+
+export type NotificationType =
+  | 'deployment'
+  | 'health_check'
+  | 'server'
+  | 'cleanup'
+  | 'project'
+  | 'system'
+
+export type NotificationLevel = 'info' | 'success' | 'warning' | 'error'
+
+export interface SystemNotification {
+  id: string
+  type: NotificationType
+  level: NotificationLevel
+  title: string
+  message: string
+  read: boolean
+  createdAt: string
+  metadata?: {
+    projectId?: string
+    projectName?: string
+    deploymentId?: string
+    serverId?: string
+    serverName?: string
+    link?: 'dashboard' | 'list' | 'servers' | 'settings' | 'deployment' | 'project'
+    [key: string]: any
+  }
+}
+

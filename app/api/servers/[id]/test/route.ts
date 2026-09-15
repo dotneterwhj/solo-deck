@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getServerById, updateServer } from '@/lib/db'
+import { getServerById, updateServer, maskServerCredentials, createNotification } from '@/lib/db'
 import { Client } from 'ssh2'
 
 export async function POST(
@@ -94,9 +94,35 @@ export async function POST(
       latencyMs: latency,
     })
 
+    if (!isOnline && server.status === 'online') {
+      createNotification({
+        type: 'server',
+        level: 'error',
+        title: `主机失联告警: 【${server.name}】`,
+        message: `主机 ${server.ip}:${server.port} 连通性测试未通过: ${message}`,
+        metadata: {
+          serverId: server.id,
+          serverName: server.name,
+          link: 'servers',
+        },
+      })
+    } else if (isOnline && server.status === 'offline') {
+      createNotification({
+        type: 'server',
+        level: 'success',
+        title: `主机恢复在线: 【${server.name}】`,
+        message: `主机 ${server.ip}:${server.port} SSH 连通恢复正常 (延迟: ${latency}ms)`,
+        metadata: {
+          serverId: server.id,
+          serverName: server.name,
+          link: 'servers',
+        },
+      })
+    }
+
     return NextResponse.json({
       success: isOnline,
-      server: updated,
+      server: updated ? maskServerCredentials(updated) : undefined,
       message,
     })
   } catch (err: any) {

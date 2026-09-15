@@ -28,6 +28,7 @@ export async function POST(req: NextRequest) {
       gitUsername: body.gitUsername || '',
       gitToken: body.gitToken || '',
       runtime: body.runtime || 'Node.js',
+      deployTargetMode: body.deployTargetMode || 'docker',
       status: 'stopped',
       serverId: body.serverId || '',
       serverIp: body.serverIp || '127.0.0.1',

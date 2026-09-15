@@ -18,14 +18,18 @@ import {
   Clock,
   ExternalLink,
   Boxes,
-  FolderArchive,
   Activity,
   HeartCrack,
   RefreshCw,
+  RotateCcw,
+  Terminal,
+  Cpu,
+  Copy,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Project, ProjectStatus, HealthStatus } from '@/lib/types'
+import { getAllRuntimes } from '@/lib/runtimes'
 import { formatRelativeTime, formatExactTime, formatShortTime } from '@/lib/time-utils'
 
 interface ProjectListProps {
@@ -34,6 +38,7 @@ interface ProjectListProps {
   onDeploy: (projectId: string) => void
   onViewDetails: (project: Project) => void
   onDeleteProject: (projectId: string) => void
+  onCloneProject?: (project: Project) => void
   onProjectUpdated?: (project: Project) => void
   onRefreshProjects?: () => void
 }
@@ -44,6 +49,7 @@ export function ProjectList({
   onDeploy,
   onViewDetails,
   onDeleteProject,
+  onCloneProject,
   onProjectUpdated,
   onRefreshProjects,
 }: ProjectListProps) {
@@ -213,7 +219,7 @@ export function ProjectList({
         return 'bg-cyan-500/10 text-cyan-500 border-cyan-500/20'
       case 'Java':
         return 'bg-amber-500/10 text-amber-500 border-amber-500/20'
-      case 'Docker':
+      case 'Static Web':
         return 'bg-sky-500/10 text-sky-500 border-sky-500/20'
       default:
         return 'bg-muted text-muted-foreground border-border'
@@ -415,12 +421,11 @@ export function ProjectList({
               className="h-9 rounded-lg border border-input bg-card px-2.5 text-xs shadow-xs text-muted-foreground focus-visible:outline-none"
             >
               <option value="all">所有运行环境</option>
-              <option value="Node.js">Node.js</option>
-              <option value="Python">Python</option>
-              <option value="ASP.NET Core">ASP.NET Core</option>
-              <option value="Go">Go</option>
-              <option value="Java">Java</option>
-              <option value="Docker">Docker</option>
+              {getAllRuntimes().map((rt) => (
+                <option key={rt.id} value={rt.name}>
+                  {rt.name}
+                </option>
+              ))}
             </select>
 
             {/* Target Server dropdown */}
@@ -633,18 +638,15 @@ export function ProjectList({
                 >
                   {project.runtime}
                 </span>
-                {project.artifactType === 'docker' ||
-                (!project.artifactType &&
-                  (project.runtime === 'Docker' ||
-                    (project.buildCommand && project.buildCommand.toLowerCase().includes('docker build')))) ? (
-                  <span className="hidden sm:inline-flex px-2 py-0.5 rounded text-xs font-medium border bg-blue-500/10 text-blue-400 border-blue-500/30 items-center gap-1">
-                    <Boxes className="size-3" />
-                    {project.dockerDeliveryMode === 'registry' ? 'Docker 仓库' : 'Docker 镜像'}
+                {project.deployTargetMode === 'native' ? (
+                  <span className="hidden sm:inline-flex px-2 py-0.5 rounded text-xs font-medium border bg-amber-500/10 text-amber-500 border-amber-500/30 items-center gap-1">
+                    <Terminal className="size-3" />
+                    原生进程
                   </span>
                 ) : (
-                  <span className="hidden sm:inline-flex px-2 py-0.5 rounded text-xs font-medium border bg-amber-500/10 text-amber-400 border-amber-500/30 items-center gap-1">
-                    <FolderArchive className="size-3" />
-                    Tar 归档
+                  <span className="hidden sm:inline-flex px-2 py-0.5 rounded text-xs font-medium border bg-blue-500/10 text-blue-400 border-blue-500/30 items-center gap-1">
+                    <Boxes className="size-3" />
+                    {project.dockerDeliveryMode === 'registry' ? 'Docker 仓库' : 'Docker 容器'}
                   </span>
                 )}
               </div>
@@ -883,6 +885,19 @@ export function ProjectList({
                   <ChevronRight className="size-3.5" />
                   查看详情与流水线
                 </Button>
+
+                {onCloneProject && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onCloneProject(project)}
+                    className="gap-1.5 text-xs h-8 text-muted-foreground hover:text-foreground"
+                    title="克隆项目至其他服务器"
+                  >
+                    <Copy className="size-3.5" />
+                    克隆
+                  </Button>
+                )}
 
                 <button
                   onClick={() => onDeleteProject(project.id)}

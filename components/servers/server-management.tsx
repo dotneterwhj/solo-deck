@@ -30,12 +30,13 @@ export function ServerManagement() {
   const [servers, setServers] = useState<ServerNode[]>([])
   const [loading, setLoading] = useState(true)
   const [testingId, setTestingId] = useState<string | null>(null)
-  const [showAddModal, setShowAddModal] = useState(false)
+  const [showModal, setShowModal] = useState(false)
+  const [editingServer, setEditingServer] = useState<ServerNode | null>(null)
   const [selectedServerForEnv, setSelectedServerForEnv] = useState<ServerNode | null>(null)
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; msg: string }>>({})
 
-  // New server form
-  const [newServer, setNewServer] = useState({
+  // Server Form (Add or Edit)
+  const initialFormData = {
     name: '',
     ip: '',
     port: '22',
@@ -46,9 +47,10 @@ export function ServerManagement() {
     passphrase: '',
     tags: '生产, Linux',
     description: '',
-  })
+  }
+  const [formData, setFormData] = useState(initialFormData)
   const [showPassword, setShowPassword] = useState(false)
-  const [creating, setCreating] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
 
   const loadServers = async () => {
     setLoading(true)
@@ -68,6 +70,31 @@ export function ServerManagement() {
   useEffect(() => {
     loadServers()
   }, [])
+
+  const handleOpenAddModal = () => {
+    setEditingServer(null)
+    setFormData(initialFormData)
+    setShowPassword(false)
+    setShowModal(true)
+  }
+
+  const handleOpenEditModal = (server: ServerNode) => {
+    setEditingServer(server)
+    setFormData({
+      name: server.name || '',
+      ip: server.ip || '',
+      port: String(server.port || 22),
+      user: server.user || 'root',
+      authType: server.authType || 'password',
+      password: '', // 留空表示保持原有凭据不变
+      privateKey: '', // 留空表示保持原有凭据不变
+      passphrase: '',
+      tags: server.tags?.join(', ') || '',
+      description: server.description || '',
+    })
+    setShowPassword(false)
+    setShowModal(true)
+  }
 
   const handleTestConnectivity = async (id: string) => {
     setTestingId(id)
@@ -104,52 +131,65 @@ export function ServerManagement() {
     }
   }
 
-  const handleCreateServer = async () => {
-    if (!newServer.name || !newServer.ip) return
-    setCreating(true)
+  const handleSaveServer = async () => {
+    if (!formData.name || !formData.ip) return
+    setSubmitting(true)
     try {
-      const tagsArray = newServer.tags
+      const tagsArray = formData.tags
         .split(/[,，]/)
         .map((t) => t.trim())
         .filter(Boolean)
 
-      const res = await fetch('/api/servers', {
-        method: 'POST',
+      const payload: any = {
+        name: formData.name,
+        ip: formData.ip,
+        port: Number(formData.port) || 22,
+        user: formData.user,
+        authType: formData.authType,
+        tags: tagsArray,
+        description: formData.description,
+      }
+
+      if (!editingServer) {
+        // 新增模式：提交填写的密码/私钥
+        payload.password = formData.password || ''
+        payload.privateKey = formData.privateKey || ''
+        payload.passphrase = formData.passphrase || ''
+      } else {
+        // 编辑模式：仅当用户主动输入新凭据时才提交，留空则不覆盖数据库中的密码
+        if (formData.password && formData.password.trim()) {
+          payload.password = formData.password.trim()
+        }
+        if (formData.privateKey && formData.privateKey.trim()) {
+          payload.privateKey = formData.privateKey.trim()
+        }
+        if (formData.passphrase && formData.passphrase.trim()) {
+          payload.passphrase = formData.passphrase.trim()
+        }
+      }
+
+      const url = editingServer ? `/api/servers/${editingServer.id}` : '/api/servers'
+      const method = editingServer ? 'PUT' : 'POST'
+
+      const res = await fetch(url, {
+        method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: newServer.name,
-          ip: newServer.ip,
-          port: Number(newServer.port) || 22,
-          user: newServer.user,
-          authType: newServer.authType,
-          password: newServer.password,
-          privateKey: newServer.privateKey,
-          passphrase: newServer.passphrase,
-          tags: tagsArray,
-          description: newServer.description,
-        }),
+        body: JSON.stringify(payload),
       })
 
       if (res.ok) {
-        setShowAddModal(false)
-        setNewServer({
-          name: '',
-          ip: '',
-          port: '22',
-          user: 'root',
-          authType: 'password',
-          password: '',
-          privateKey: '',
-          passphrase: '',
-          tags: '生产, Linux',
-          description: '',
-        })
+        setShowModal(false)
+        setEditingServer(null)
         loadServers()
+      } else {
+        const data = await res.json()
+        alert(data.error || '保存服务器失败')
       }
-    } catch (err) {
-      console.error('Create server error', err)
+    } catch (err: any) {
+      console.error('Save server error', err)
+      alert('保存服务器失败: ' + err.message)
     } finally {
-      setCreating(false)
+      setSubmitting(false)
     }
   }
 
@@ -178,7 +218,7 @@ export function ServerManagement() {
 
           <Button
             size="sm"
-            onClick={() => setShowAddModal(true)}
+            onClick={handleOpenAddModal}
             className="gap-1.5 text-xs font-semibold"
           >
             <Plus className="size-4" />
@@ -197,7 +237,7 @@ export function ServerManagement() {
           <p className="text-muted-foreground text-sm">暂无注册的服务器节点</p>
           <Button
             size="sm"
-            onClick={() => setShowAddModal(true)}
+            onClick={handleOpenAddModal}
             className="mt-3 text-xs"
           >
             立即添加首台主机
@@ -250,13 +290,22 @@ export function ServerManagement() {
                     </div>
                   </div>
 
-                  <button
-                    onClick={() => handleDeleteServer(server.id)}
-                    className="p-1.5 text-muted-foreground hover:text-red-500 rounded-lg hover:bg-muted transition-colors"
-                    title="删除服务器"
-                  >
-                    <Trash2 className="size-4" />
-                  </button>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => handleOpenEditModal(server)}
+                      className="p-1.5 text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted transition-colors"
+                      title="编辑服务器配置"
+                    >
+                      <Edit2 className="size-4" />
+                    </button>
+                    <button
+                      onClick={() => handleDeleteServer(server.id)}
+                      className="p-1.5 text-muted-foreground hover:text-red-500 rounded-lg hover:bg-muted transition-colors"
+                      title="删除服务器"
+                    >
+                      <Trash2 className="size-4" />
+                    </button>
+                  </div>
                 </div>
 
                 {/* Server specs & auth info */}
@@ -266,11 +315,19 @@ export function ServerManagement() {
                     <span className="font-medium text-foreground flex items-center gap-1 mt-0.5">
                       {isKeyAuth ? (
                         <>
-                          <KeyRound className="size-3 text-primary" /> 私钥认证
+                          <KeyRound className="size-3 text-primary shrink-0" />
+                          <span>私钥认证</span>
+                          <span className="text-[10px] text-muted-foreground font-mono">
+                            {server.hasPrivateKey || (server.privateKey && server.privateKey !== '') ? '(已加密脱敏)' : '(未配置)'}
+                          </span>
                         </>
                       ) : (
                         <>
-                          <Lock className="size-3 text-primary" /> 密码认证
+                          <Lock className="size-3 text-primary shrink-0" />
+                          <span>密码认证</span>
+                          <span className="text-[10px] text-muted-foreground font-mono">
+                            {server.hasPassword || (server.password && server.password !== '') ? '(已加密脱敏)' : '(未配置)'}
+                          </span>
                         </>
                       )}
                     </span>
@@ -357,19 +414,23 @@ export function ServerManagement() {
         </div>
       )}
 
-      {/* Add Server Modal with SSH Credentials */}
-      {showAddModal && (
+      {/* Server Add / Edit Modal with SSH Credentials */}
+      {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
           <div className="w-full max-w-xl rounded-xl bg-card border border-border shadow-2xl flex flex-col max-h-[90vh] overflow-hidden">
             <div className="flex items-center justify-between border-b border-border px-6 py-4 bg-muted/20">
               <div>
-                <h3 className="text-base font-bold text-foreground">添加服务器节点</h3>
+                <h3 className="text-base font-bold text-foreground">
+                  {editingServer ? '编辑服务器节点' : '添加服务器节点'}
+                </h3>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  配置主机网络地址与 SSH 登录凭据以支持远程构建部署
+                  {editingServer
+                    ? '修改主机网络地址、SSH 端口及认证凭据（留空凭据表示保持原有配置不变）'
+                    : '配置主机网络地址与 SSH 登录凭据以支持远程构建部署'}
                 </p>
               </div>
               <button
-                onClick={() => setShowAddModal(false)}
+                onClick={() => setShowModal(false)}
                 className="rounded-md p-1 hover:bg-muted text-muted-foreground hover:text-foreground"
               >
                 <X className="size-5" />
@@ -383,8 +444,8 @@ export function ServerManagement() {
                 </label>
                 <Input
                   placeholder="例如：核心生产集群 2 号机"
-                  value={newServer.name}
-                  onChange={(e) => setNewServer({ ...newServer, name: e.target.value })}
+                  value={formData.name}
+                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                   className="mt-1"
                 />
               </div>
@@ -396,8 +457,8 @@ export function ServerManagement() {
                   </label>
                   <Input
                     placeholder="192.168.1.120 或 host.example.com"
-                    value={newServer.ip}
-                    onChange={(e) => setNewServer({ ...newServer, ip: e.target.value })}
+                    value={formData.ip}
+                    onChange={(e) => setFormData({ ...formData, ip: e.target.value })}
                     className="mt-1 font-mono text-sm"
                   />
                 </div>
@@ -405,8 +466,8 @@ export function ServerManagement() {
                   <label className="text-xs font-semibold text-muted-foreground">SSH 端口</label>
                   <Input
                     placeholder="22"
-                    value={newServer.port}
-                    onChange={(e) => setNewServer({ ...newServer, port: e.target.value })}
+                    value={formData.port}
+                    onChange={(e) => setFormData({ ...formData, port: e.target.value })}
                     className="mt-1 font-mono text-sm"
                   />
                 </div>
@@ -418,8 +479,8 @@ export function ServerManagement() {
                 </label>
                 <Input
                   placeholder="root 或 ubuntu / deploy"
-                  value={newServer.user}
-                  onChange={(e) => setNewServer({ ...newServer, user: e.target.value })}
+                  value={formData.user}
+                  onChange={(e) => setFormData({ ...formData, user: e.target.value })}
                   className="mt-1 font-mono text-sm"
                 />
               </div>
@@ -432,8 +493,8 @@ export function ServerManagement() {
                 <div className="grid grid-cols-2 gap-3">
                   <button
                     type="button"
-                    onClick={() => setNewServer({ ...newServer, authType: 'password' })}
-                    className={`p-3 rounded-lg border-2 text-left transition-all ${newServer.authType === 'password'
+                    onClick={() => setFormData({ ...formData, authType: 'password' })}
+                    className={`p-3 rounded-lg border-2 text-left transition-all ${formData.authType === 'password'
                         ? 'border-primary bg-primary/5'
                         : 'border-border hover:border-primary/40'
                       }`}
@@ -449,8 +510,8 @@ export function ServerManagement() {
 
                   <button
                     type="button"
-                    onClick={() => setNewServer({ ...newServer, authType: 'privateKey' })}
-                    className={`p-3 rounded-lg border-2 text-left transition-all ${newServer.authType === 'privateKey'
+                    onClick={() => setFormData({ ...formData, authType: 'privateKey' })}
+                    className={`p-3 rounded-lg border-2 text-left transition-all ${formData.authType === 'privateKey'
                         ? 'border-primary bg-primary/5'
                         : 'border-border hover:border-primary/40'
                       }`}
@@ -465,18 +526,18 @@ export function ServerManagement() {
                   </button>
                 </div>
 
-                {newServer.authType === 'password' ? (
+                {formData.authType === 'password' ? (
                   <div className="pt-2">
                     <label className="text-xs font-semibold text-muted-foreground">
-                      SSH 密码
+                      SSH 密码 {editingServer && <span className="text-xs font-normal text-muted-foreground">(留空保持不变)</span>}
                     </label>
                     <div className="relative mt-1">
                       <Input
                         type={showPassword ? 'text' : 'password'}
-                        placeholder="请输入 SSH 连接密码"
-                        value={newServer.password}
+                        placeholder={editingServer ? '留空表示保持原有密码不变' : '请输入 SSH 连接密码'}
+                        value={formData.password}
                         onChange={(e) =>
-                          setNewServer({ ...newServer, password: e.target.value })
+                          setFormData({ ...formData, password: e.target.value })
                         }
                         className="font-mono text-sm pr-10"
                       />
@@ -488,33 +549,47 @@ export function ServerManagement() {
                         {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                       </button>
                     </div>
+                    {editingServer && (
+                      <p className="text-[11px] text-muted-foreground mt-1">
+                        当前已配置密码认证凭据。如无需更换密码，此处请直接留空。
+                      </p>
+                    )}
                   </div>
                 ) : (
                   <div className="pt-2 space-y-3">
                     <div>
                       <label className="text-xs font-semibold text-muted-foreground">
-                        SSH 私钥文本 (id_rsa / id_ed25519)
+                        SSH 私钥文本 (id_rsa / id_ed25519) {editingServer && <span className="text-xs font-normal text-muted-foreground">(留空保持不变)</span>}
                       </label>
                       <textarea
                         rows={4}
-                        placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"
-                        value={newServer.privateKey}
+                        placeholder={
+                          editingServer
+                            ? '留空表示保持原有私钥不变\n-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----'
+                            : '-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----'
+                        }
+                        value={formData.privateKey}
                         onChange={(e) =>
-                          setNewServer({ ...newServer, privateKey: e.target.value })
+                          setFormData({ ...formData, privateKey: e.target.value })
                         }
                         className="w-full mt-1 p-2.5 rounded-md border border-input bg-card font-mono text-xs shadow-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                       />
+                      {editingServer && (
+                        <p className="text-[11px] text-muted-foreground mt-1">
+                          当前已配置私钥认证凭据。如无需更换私钥，此处请直接留空。
+                        </p>
+                      )}
                     </div>
                     <div>
                       <label className="text-xs font-semibold text-muted-foreground">
-                        私钥口令 (Passphrase，无密码可留空)
+                        私钥口令 (Passphrase，无密码可留空) {editingServer && <span className="text-xs font-normal text-muted-foreground">(留空保持不变)</span>}
                       </label>
                       <Input
                         type="password"
-                        placeholder="私钥解密口令"
-                        value={newServer.passphrase}
+                        placeholder={editingServer ? '留空表示保持原有口令不变' : '私钥解密口令'}
+                        value={formData.passphrase}
                         onChange={(e) =>
-                          setNewServer({ ...newServer, passphrase: e.target.value })
+                          setFormData({ ...formData, passphrase: e.target.value })
                         }
                         className="mt-1 font-mono text-sm"
                       />
@@ -529,8 +604,8 @@ export function ServerManagement() {
                 </label>
                 <Input
                   placeholder="生产, 核心网关, Docker"
-                  value={newServer.tags}
-                  onChange={(e) => setNewServer({ ...newServer, tags: e.target.value })}
+                  value={formData.tags}
+                  onChange={(e) => setFormData({ ...formData, tags: e.target.value })}
                   className="mt-1 text-sm"
                 />
               </div>
@@ -539,23 +614,23 @@ export function ServerManagement() {
                 <label className="text-xs font-semibold text-muted-foreground">备注说明</label>
                 <Input
                   placeholder="说明该服务器部署的业务组件"
-                  value={newServer.description}
-                  onChange={(e) => setNewServer({ ...newServer, description: e.target.value })}
+                  value={formData.description}
+                  onChange={(e) => setFormData({ ...formData, description: e.target.value })}
                   className="mt-1 text-sm"
                 />
               </div>
             </div>
 
             <div className="flex justify-end gap-2 px-6 py-3.5 border-t border-border bg-muted/20">
-              <Button variant="outline" size="sm" onClick={() => setShowAddModal(false)}>
+              <Button variant="outline" size="sm" onClick={() => setShowModal(false)}>
                 取消
               </Button>
               <Button
                 size="sm"
-                onClick={handleCreateServer}
-                disabled={creating || !newServer.name || !newServer.ip}
+                onClick={handleSaveServer}
+                disabled={submitting || !formData.name || !formData.ip}
               >
-                {creating ? '添加中...' : '确认添加'}
+                {submitting ? (editingServer ? '保存中...' : '添加中...') : (editingServer ? '保存修改' : '确认添加')}
               </Button>
             </div>
           </div>

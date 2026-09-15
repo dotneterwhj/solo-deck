@@ -106,6 +106,57 @@ fi`,
     },
   },
   {
+    key: 'go',
+    name: 'Go 语言环境',
+    desc: '用于编译与运行 Go 原生二进制微服务',
+    checkCmd: 'go version',
+    installScript: `if command -v apt-get >/dev/null 2>&1; then
+  apt-get update && apt-get install -y golang-go
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y golang
+else
+  echo "未检测到支持的包管理器" && exit 1
+fi`,
+    manualGuide: {
+      ubuntu: 'sudo apt update && sudo apt install -y golang-go',
+      centos: 'sudo yum install -y golang',
+    },
+  },
+  {
+    key: 'java',
+    name: 'Java JRE/JDK 运行时',
+    desc: '用于运行 Spring Boot / Java 企业级微服务 (推荐 OpenJDK 17/21)',
+    checkCmd: 'java -version',
+    installScript: `if command -v apt-get >/dev/null 2>&1; then
+  apt-get update && apt-get install -y openjdk-17-jre-headless
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y java-17-openjdk-headless
+else
+  echo "未检测到支持的包管理器" && exit 1
+fi`,
+    manualGuide: {
+      ubuntu: 'sudo apt update && sudo apt install -y openjdk-17-jre-headless',
+      centos: 'sudo yum install -y java-17-openjdk-headless',
+    },
+  },
+  {
+    key: 'nginx',
+    name: 'Nginx Web 服务器',
+    desc: '用于托管前端单页应用 (SPA)、反向代理与静态资源分发',
+    checkCmd: 'nginx -v',
+    installScript: `if command -v apt-get >/dev/null 2>&1; then
+  apt-get update && apt-get install -y nginx && systemctl enable --now nginx
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y nginx && systemctl enable --now nginx
+else
+  echo "未检测到支持的包管理器" && exit 1
+fi`,
+    manualGuide: {
+      ubuntu: 'sudo apt update && sudo apt install -y nginx\nsudo systemctl enable --now nginx',
+      centos: 'sudo yum install -y nginx\nsudo systemctl enable --now nginx',
+    },
+  },
+  {
     key: 'git',
     name: 'Git 版本控制工具',
     desc: '用于在目标服务器拉取代码与版本检出',
@@ -124,22 +175,11 @@ fi`,
   },
 ]
 
+import { getRequiredEnvKeysForRuntime } from './runtimes'
+
 /**
- * 根据项目运行时类型匹配其前置依赖项
+ * 根据项目运行时类型匹配其前置依赖项（在 Docker 容器化交付体系下，统一由运行时抽象层声明）
  */
-export function getRequiredEnvKeys(runtime: string): string[] {
-  switch (runtime) {
-    case 'Node.js':
-      return ['node', 'git']
-    case 'Python':
-      return ['python3', 'gunicorn', 'git']
-    case 'ASP.NET Core':
-      return ['dotnet', 'git']
-    case 'Docker':
-      return ['docker', 'git']
-    case 'Go':
-      return ['git']
-    default:
-      return ['git']
-  }
+export function getRequiredEnvKeys(runtime: string, mode: 'docker' | 'native' = 'docker'): string[] {
+  return getRequiredEnvKeysForRuntime(runtime, mode)
 }
