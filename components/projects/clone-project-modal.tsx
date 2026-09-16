@@ -14,10 +14,13 @@ import {
   GitBranch,
   ShieldCheck,
   Tag,
+  FileCode,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Project, ServerNode, DeployTargetMode, RunnerMode } from '@/lib/types'
+import { Project, ServerNode, DeployTargetMode, RunnerMode, DockerBuildArg, PortMapping } from '@/lib/types'
+import { getRuntime } from '@/lib/runtimes'
+import { validateProjectName } from '@/lib/validators'
 
 interface CloneProjectModalProps {
   isOpen?: boolean
@@ -36,12 +39,16 @@ export function CloneProjectModal({
 }: CloneProjectModalProps) {
   const [name, setName] = useState('')
   const [selectedServerId, setSelectedServerId] = useState('')
-  const [port, setPort] = useState<number>(3000)
+  const [serverPort, setServerPort] = useState<number[]>([3000])
+  const [containerPort, setContainerPort] = useState<number[]>([3000])
+  const [portMappings, setPortMappings] = useState<PortMapping[]>([{ host: 3000, container: 3000 }])
+  const [portInput, setPortInput] = useState('3000')
   const [deployPath, setDeployPath] = useState('')
   const [branch, setBranch] = useState('main')
   const [deployTargetMode, setDeployTargetMode] = useState<DeployTargetMode>('docker')
   const [runnerMode, setRunnerMode] = useState<RunnerMode>('simulation')
   const [description, setDescription] = useState('')
+  const [dockerBuildArgs, setDockerBuildArgs] = useState<DockerBuildArg[]>([])
   const [submitting, setSubmitting] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
 
@@ -52,15 +59,36 @@ export function CloneProjectModal({
       const otherServer = servers.find((s) => s.id !== project.serverId)
       const targetServer = otherServer || servers.find((s) => s.id === project.serverId) || servers[0]
 
-      const defaultServerName = targetServer ? targetServer.name : '新节点'
-      setName(`${project.name}-${defaultServerName.replace(/\s+/g, '-').toLowerCase()}`)
+      const rawServerSuffix = targetServer ? targetServer.name.toLowerCase().replace(/[^a-z0-9_-]/g, '') : ''
+      const safeSuffix = rawServerSuffix ? rawServerSuffix : 'copy'
+      const defaultName = `${project.name}-${safeSuffix}`
+      setName(validateProjectName(defaultName).valid ? defaultName : `${project.name}-copy`)
       setSelectedServerId(targetServer ? targetServer.id : project.serverId || '')
-      setPort(project.port || 3000)
+      const initialPorts = project.serverPort && project.serverPort.length > 0 ? project.serverPort : [3000]
+      setServerPort(initialPorts)
+      setPortInput(initialPorts.join(', '))
+      const initialCPorts = project.containerPort && project.containerPort.length > 0 ? project.containerPort : [...initialPorts]
+      setContainerPort(initialCPorts)
+      const initialMappings = project.portMappings && project.portMappings.length > 0
+        ? project.portMappings
+        : initialPorts.map((h, i) => ({ host: h, container: initialCPorts[i] || h }))
+      setPortMappings(initialMappings)
       setDeployPath(project.deployPath || '/opt/app')
       setBranch(project.branch || 'main')
       setDeployTargetMode(project.deployTargetMode || 'docker')
       setRunnerMode(project.runnerMode || 'real')
       setDescription(`克隆自 ${project.name}，配置部署至目标主机`)
+
+      // 初始化 Docker 构建参数
+      const plugin = getRuntime(project.runtime)
+      const initialArgs = (plugin?.dockerBuildArgs || []).map((def) => {
+        const existing = project.dockerBuildArgs?.find((a) => a.key === def.key)
+        return {
+          key: def.key,
+          value: existing?.value !== undefined ? existing.value : (def.defaultValue || ''),
+        }
+      })
+      setDockerBuildArgs(initialArgs)
       setErrorMsg('')
     }
   }, [project, servers, isOpen])
@@ -69,22 +97,24 @@ export function CloneProjectModal({
 
   const selectedServer = servers.find((s) => s.id === selectedServerId)
 
-  // 冲突检测：如果选择了同一台服务器且端口相同
-  const isSameServerAndPort =
+  // 冲突检测：如果选择了同一台服务器且有端口重叠
+  const sourcePorts = project.serverPort && project.serverPort.length > 0 ? project.serverPort : [3000]
+  const hasPortConflict =
     project.serverId &&
     selectedServerId === project.serverId &&
-    Number(port) === Number(project.port)
+    serverPort.some((p) => sourcePorts.includes(p))
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setErrorMsg('')
 
-    if (!name.trim()) {
-      setErrorMsg('请输入新项目流水线名称')
+    const nameVal = validateProjectName(name)
+    if (!nameVal.valid) {
+      setErrorMsg(nameVal.error || '项目名称不符合规范')
       return
     }
-    if (!port || isNaN(Number(port))) {
-      setErrorMsg('请输入有效的端口号')
+    if (!serverPort || serverPort.length === 0) {
+      setErrorMsg('请输入至少一个有效端口号')
       return
     }
 
@@ -96,12 +126,18 @@ export function CloneProjectModal({
         serverIp: selectedServer?.ip || '127.0.0.1',
         serverName: selectedServer?.name || '目标节点',
         serverTags: selectedServer?.tags || [],
-        port: Number(port),
+        serverPort,
+        containerPort,
+        portMappings: serverPort.map((sp, idx) => ({
+          host: sp,
+          container: (containerPort && containerPort[idx]) || sp,
+        })),
         deployPath: deployPath.trim() || '/opt/app',
         branch: branch.trim() || 'main',
         deployTargetMode,
         runnerMode,
         description: description.trim(),
+        dockerBuildArgs: dockerBuildArgs.filter((a) => a.key && a.value),
       }
 
       const res = await fetch(`/api/projects/${project.id}/clone`, {
@@ -171,10 +207,13 @@ export function CloneProjectModal({
                 运行时: {project.runtime}
               </span>
             </div>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px] text-muted-foreground font-mono">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] text-muted-foreground font-mono">
               <div className="truncate">仓库: {project.repository}</div>
               <div className="truncate">源分支: {project.branch}</div>
               <div className="truncate">环境变量: {project.envVars?.length || 0} 个</div>
+              {project.dockerBuildArgs && project.dockerBuildArgs.filter((a) => a.key && a.value).length > 0 && (
+                <div className="truncate text-violet-400">构建参数: {project.dockerBuildArgs.filter((a) => a.key && a.value).length} 个 (ARG)</div>
+              )}
             </div>
           </div>
 
@@ -185,16 +224,29 @@ export function CloneProjectModal({
                 新项目名称 <span className="text-destructive">*</span>
               </span>
               <span className="text-[11px] text-muted-foreground font-normal">
-                建议体现目标主机或用途后缀
+                仅限小写字母、数字、"-" 及 "_"
               </span>
             </label>
             <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="例如：my-app-prod-node2"
-              className="text-sm font-medium"
+              placeholder="例如：my-app-node2"
+              className={`text-sm font-mono ${
+                name && !validateProjectName(name).valid
+                  ? 'border-destructive focus-visible:ring-destructive'
+                  : ''
+              }`}
               autoFocus
             />
+            {name && !validateProjectName(name).valid ? (
+              <p className="text-[11px] text-destructive flex items-center gap-1">
+                <span>{validateProjectName(name).error}</span>
+              </p>
+            ) : (
+              <p className="text-[11px] text-muted-foreground/70">
+                格式规范：只能包含小写英文字母、数字、"-" 及 "_"，且不能以数字开头和不能包含空格。
+              </p>
+            )}
           </div>
 
           {/* Step 2: 目标部署主机 */}
@@ -282,20 +334,48 @@ export function CloneProjectModal({
           {/* Step 3: 服务监听端口与部署路径 */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
-              <label className="font-semibold text-foreground block">
-                服务暴露端口 (Port) <span className="text-destructive">*</span>
-              </label>
+              <div className="flex items-center justify-between">
+                <label className="font-semibold text-foreground block">
+                  服务暴露端口 (Port) <span className="text-destructive">*</span>
+                </label>
+                <span className="text-[10px] text-muted-foreground">多端口用逗号分隔</span>
+              </div>
               <Input
-                type="number"
-                value={port}
-                onChange={(e) => setPort(Number(e.target.value))}
-                placeholder="例如：3001"
+                value={portInput}
+                onChange={(e) => {
+                  const val = e.target.value
+                  setPortInput(val)
+                  const parsed = val
+                    .split(/[,，\s]+/)
+                    .map((p) => parseInt(p.trim(), 10))
+                    .filter((p) => !isNaN(p) && p > 0 && p <= 65535)
+                  if (parsed.length > 0) {
+                    setServerPort(parsed)
+                  }
+                }}
+                placeholder="例如：3001, 8080"
                 className="font-mono text-sm"
               />
-              {isSameServerAndPort ? (
+              {serverPort && serverPort.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                  {serverPort.map((p, idx) => (
+                    <span
+                      key={p}
+                      className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${
+                        idx === 0
+                          ? 'bg-primary/10 text-primary border-primary/20 font-medium'
+                          : 'bg-muted text-foreground border-border'
+                      }`}
+                    >
+                      :{p} {idx === 0 && <span className="text-[10px] text-primary/70">(主端口)</span>}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {hasPortConflict ? (
                 <p className="text-[11px] text-amber-500 flex items-center gap-1 mt-1">
                   <AlertTriangle className="size-3 shrink-0" />
-                  提示：与源项目部署在同一主机，建议修改端口避免端口占用冲突
+                  提示：与源项目部署在同一主机且端口重叠，建议修改端口避免冲突
                 </p>
               ) : (
                 <p className="text-[11px] text-muted-foreground mt-1">
@@ -386,6 +466,67 @@ export function CloneProjectModal({
               </div>
             </div>
           </div>
+
+          {/* Docker 构建参数配置 (仅在容器模式且运行时声明了构建参数时显示) */}
+          {(() => {
+            const plugin = getRuntime(project.runtime)
+            if (deployTargetMode !== 'docker' || !plugin?.dockerBuildArgs || plugin.dockerBuildArgs.length === 0) {
+              return null
+            }
+
+            return (
+              <div className="p-3.5 rounded-xl border border-violet-500/30 bg-violet-500/5 space-y-2.5">
+                <div className="flex items-center gap-2">
+                  <div className="size-5 rounded bg-violet-500/20 text-violet-400 flex items-center justify-center">
+                    <FileCode className="size-3" />
+                  </div>
+                  <span className="font-semibold text-foreground text-xs">
+                    Docker 构建参数 (Build Args)
+                  </span>
+                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-violet-500/15 text-violet-400 font-medium">
+                    对应 Dockerfile ARG
+                  </span>
+                </div>
+                <p className="text-[11px] text-muted-foreground leading-snug">
+                  克隆后将在 <code className="text-violet-400 font-mono">docker build</code> 时通过{' '}
+                  <code className="text-violet-400 font-mono">--build-arg</code> 注入：
+                </p>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {plugin.dockerBuildArgs.map((argDef) => {
+                    const currentArg = dockerBuildArgs.find((a) => a.key === argDef.key)
+                    const val = currentArg?.value !== undefined ? currentArg.value : (argDef.defaultValue || '')
+                    return (
+                      <div key={argDef.key} className="space-y-1">
+                        <label className="text-[11px] font-semibold text-muted-foreground flex items-center gap-1">
+                          <code className="text-violet-400 font-mono">{argDef.key}</code>
+                          {argDef.required && <span className="text-destructive">*</span>}
+                        </label>
+                        <Input
+                          value={val}
+                          onChange={(e) => {
+                            const newArgs = (plugin.dockerBuildArgs || []).map((def) => {
+                              if (def.key === argDef.key) {
+                                return { key: def.key, value: e.target.value }
+                              }
+                              const existing = dockerBuildArgs.find((a) => a.key === def.key)
+                              return {
+                                key: def.key,
+                                value: existing?.value !== undefined ? existing.value : (def.defaultValue || ''),
+                              }
+                            })
+                            setDockerBuildArgs(newArgs)
+                          }}
+                          placeholder={argDef.placeholder || argDef.defaultValue || ''}
+                          className="font-mono text-xs h-8"
+                        />
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })()}
 
           {/* Step 5: Git 分支与描述 */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

@@ -25,7 +25,8 @@ import {
   createNotification,
 } from './db'
 import { DockerDistributorFactory } from './docker-distributor'
-import { getRuntime } from './runtimes'
+import { getRuntime, updateDockerRunEnvVars } from './runtimes'
+import { resolvePath } from './cleanup-service'
 
 export type StreamEventType = 'log' | 'status' | 'end'
 
@@ -304,9 +305,13 @@ class PipelineManager {
       fs.mkdirSync(workspaceDir, { recursive: true })
     }
 
-    log(`[00:00] 启动【真实系统 Shell 模式】执行流水线...`, 'info', 'INIT')
-    log(`[00:00] 本地工作空间目录: ${workspaceDir}`, 'info', 'INIT')
-    log(`[00:00] 目标部署服务: ${project.serverName} (${project.serverIp}:${project.port})`, 'info', 'INIT')
+    const portsDisplay =
+      project.deployTargetMode === 'docker' && project.portMappings && project.portMappings.length > 0
+        ? project.portMappings.map((m) => `:${m.host}➔:${m.container}`).join(' ')
+        : project.serverPort && project.serverPort.length > 0
+        ? project.serverPort.map((p) => `:${p}`).join(' ')
+        : ':3000'
+    log(`[00:00] 目标部署服务: ${project.serverName} (${project.serverIp}${portsDisplay.startsWith(':') ? ' ' + portsDisplay : ' ' + portsDisplay})`, 'info', 'INIT')
 
     // 查找目标服务器节点及其 SSH 凭据
     let server: ServerNode | undefined
@@ -542,6 +547,56 @@ class PipelineManager {
           log(`[00:07] ➔ 永久不可变版本: ${versionedTag}`, 'info', 'BUILD')
           log(`[00:07] ➔ 运行时最新别名: ${latestTag}`, 'info', 'BUILD')
         }
+
+        // 校验运行时必填的 Docker 构建参数 (如 .NET 的 PROJECT 路径)
+        const runtimePlugin = getRuntime(project.runtime)
+        if (runtimePlugin?.dockerBuildArgs) {
+          const missingRequired = runtimePlugin.dockerBuildArgs.filter((def) => {
+            if (!def.required) return false
+            const configuredVal = project.dockerBuildArgs?.find((a) => a.key === def.key)?.value
+            const inCmd = new RegExp(`--build-arg\\s+${def.key}=`).test(effectiveBuildCmd)
+            return (!configuredVal || !configuredVal.trim()) && !inCmd
+          })
+
+          if (missingRequired.length > 0) {
+            const missingNames = missingRequired.map((m) => m.key).join(', ')
+            log(`[00:06] [!] ❌ 错误：缺少必要的 Docker 构建参数 (ARG): ${missingNames}`, 'error', 'BUILD')
+            missingRequired.forEach((m) => {
+              log(`[00:06] [!] 💡 参数 [${m.key}]: ${m.description}${m.placeholder ? ` (示例: ${m.placeholder})` : ''}`, 'warning', 'BUILD')
+            })
+            log(`[00:06] [!] 请前往【项目详情】➔【流水线编排】中填写 Docker 构建参数后重试。`, 'warning', 'BUILD')
+            throw new Error(`应用构建失败: 缺少必填 Docker 构建参数 [${missingNames}]，请在项目配置中指定。`)
+          }
+        }
+
+        // 注入 Docker 构建参数 (--build-arg)，对应 Dockerfile 中的 ARG 指令
+        if (project.dockerBuildArgs && project.dockerBuildArgs.length > 0) {
+          const validArgs = project.dockerBuildArgs.filter(arg => arg.key && arg.value)
+          if (validArgs.length > 0) {
+            const newArgsToInject: string[] = []
+            for (const arg of validArgs) {
+              const argRegex = new RegExp(`--build-arg\\s+${arg.key}=(?:"[^"]*"|'[^']*'|[^\\s]+)`)
+              if (argRegex.test(effectiveBuildCmd)) {
+                // 已存在同名 build-arg，原地替换为最新配置值
+                effectiveBuildCmd = effectiveBuildCmd.replace(argRegex, `--build-arg ${arg.key}="${arg.value}"`)
+              } else {
+                newArgsToInject.push(`--build-arg ${arg.key}="${arg.value}"`)
+              }
+            }
+
+            if (newArgsToInject.length > 0) {
+              effectiveBuildCmd = effectiveBuildCmd.replace(
+                /docker\s+build/i,
+                `docker build ${newArgsToInject.join(' ')}`
+              )
+            }
+
+            log(`[00:07] 【Docker 构建参数】自动注入 ${validArgs.length} 个 ARG 参数:`, 'info', 'BUILD')
+            validArgs.forEach(arg => {
+              log(`[00:07] ➔ ${arg.key}=${arg.value}`, 'info', 'BUILD')
+            })
+          }
+        }
       } else if (targetMode === 'native') {
         log(`[00:06] 原生宿主机构建: 执行应用构建命令`, 'info', 'BUILD')
       }
@@ -584,10 +639,11 @@ class PipelineManager {
       project.serverIp.trim() === ''
 
     if (isLocalhost) {
-      log(`[00:11] 目标为本机节点 (127.0.0.1)，执行本地 Shell 启动: ${project.startCommand}`, 'info', 'DEPLOY')
       if (project.startCommand && project.startCommand.trim()) {
         if (targetMode === 'docker') {
-          const containerName = this.extractDockerContainerName(project.startCommand)
+          const effectiveStartCmd = updateDockerRunEnvVars(project.startCommand, project.envVars)
+          log(`[00:11] 目标为本机节点 (127.0.0.1)，执行本地 Docker 容器启动 (已注入 -e 环境变量): ${effectiveStartCmd}`, 'info', 'DEPLOY')
+          const containerName = this.extractDockerContainerName(effectiveStartCmd)
           if (containerName) {
             log(`[00:11] 正在检查本机同名 Docker 容器 [${containerName}]...`, 'info', 'DEPLOY')
             await this.cleanupLocalDockerContainer(containerName, log)
@@ -602,7 +658,7 @@ class PipelineManager {
           }
 
           let startExit = await this.spawnShell(
-            project.startCommand,
+            effectiveStartCmd,
             workspaceDir,
             {},
             abortController.signal,
@@ -624,7 +680,7 @@ class PipelineManager {
                 )
                 await this.cleanupLocalDockerContainer(conflictName, log)
                 startExit = await this.spawnShell(
-                  project.startCommand,
+                  effectiveStartCmd,
                   workspaceDir,
                   {},
                   abortController.signal,
@@ -638,14 +694,28 @@ class PipelineManager {
             throw new Error(`服务启动命令返回错误码: ${startExit}`)
           }
         } else {
-          // 原生本地进程启动
-          const envMap: Record<string, string> = { PORT: String(project.port || 3000) }
+          // 原生本地进程启动：按系统配置环境变量
+          const defaultPort = (project.serverPort && project.serverPort[0]) || 3000
+          const envMap: Record<string, string> = {
+            ...process.env,
+            PORT: String(defaultPort),
+          }
           if (project.envVars && project.envVars.length > 0) {
             project.envVars.forEach((ev) => {
               envMap[ev.key] = ev.value
             })
+            try {
+              const targetDir = resolvePath(project.deployPath || workspaceDir)
+              if (fs.existsSync(/*turbopackIgnore: true*/ targetDir)) {
+                const envLines = [
+                  `PORT=${defaultPort}`,
+                  ...(project.envVars || []).map((e) => `${e.key}=${e.value}`),
+                ]
+                fs.writeFileSync(path.join(targetDir, '.env'), envLines.join('\n'), 'utf-8')
+              }
+            } catch {}
           }
-          log(`[00:11] 原生模式派发本地进程启动: ${project.startCommand}`, 'info', 'DEPLOY')
+          log(`[00:11] 目标为本机节点 (127.0.0.1)，按系统配置环境变量并派发启动进程: ${project.startCommand}`, 'info', 'DEPLOY')
           const startExit = await this.spawnShell(
             project.startCommand,
             workspaceDir,
@@ -1165,14 +1235,28 @@ class PipelineManager {
               // 原生服务进程启动 / 重载
               if (project.startCommand && project.startCommand.trim()) {
                 setStatus('running', '服务启动')
-                let envPrefix = `export PORT=${project.port || 3000}`
+                const defaultPort = (project.serverPort && project.serverPort[0]) || 3000
+                let envPrefix = `export PORT=${defaultPort}`
                 if (project.envVars && project.envVars.length > 0) {
                   const envExports = project.envVars
-                    .map((e) => `export ${e.key}="${e.value.replace(/"/g, '\\"')}"`)
+                    .map((e) => `export ${e.key}="${(e.value || '').replace(/"/g, '\\"')}"`)
                     .join(' && ')
                   envPrefix += ` && ${envExports}`
+
+                  // 将系统环境变量写入目标部署目录下的 .env 配置文件
+                  if (project.deployPath) {
+                    const envFileLines = [
+                      `PORT=${defaultPort}`,
+                      ...project.envVars.map((e) => `${e.key}=${e.value}`),
+                    ]
+                    const writeEnvCmd = `cat << 'ENV_EOF' > "${project.deployPath}/.env"\n${envFileLines.join('\n')}\nENV_EOF`
+                    await new Promise<void>((resolveEnv) => {
+                      conn.exec(wrapSshCommand(writeEnvCmd), () => resolveEnv())
+                    })
+                  }
                 }
                 const remoteStartCmd = `cd "${project.deployPath}" && ${envPrefix} && ${project.startCommand}`
+                log(`[00:15] 原生模式已按系统配置环境变量 (注入 export 与写入 .env 配置文件)`, 'info', 'STARTUP')
                 log(`[00:15] 远程主机目标目录执行原生启动指令: ${project.startCommand}`, 'info', 'STARTUP')
 
                 await new Promise<void>((resolveStart, rejectStart) => {
@@ -1257,17 +1341,21 @@ class PipelineManager {
               // 容器启动 / 重载
               if (project.startCommand && project.startCommand.trim()) {
                 setStatus('running', '容器启动')
-                const containerName = this.extractDockerContainerName(project.startCommand)
+                const effectiveStartCmd = updateDockerRunEnvVars(project.startCommand, project.envVars)
+                const containerName = this.extractDockerContainerName(effectiveStartCmd)
                 if (containerName) {
                   log(`[00:15] 正在检查目标主机同名 Docker 容器 [${containerName}]...`, 'info', 'STARTUP')
                   await this.cleanupRemoteDockerContainer(conn, containerName, log)
                 }
 
-                log(`[00:15] 正在目标主机远程执行容器启动命令: ${project.startCommand}`, 'info', 'STARTUP')
+                if (project.envVars && project.envVars.length > 0) {
+                  log(`[00:15] Docker 容器模式: 环境变量已加入 -e 参数: ${project.envVars.map((e) => `${e.key}=${e.isSecret ? '******' : e.value}`).join(', ')}`, 'info', 'STARTUP')
+                }
+                log(`[00:15] 正在目标主机远程执行容器启动命令: ${effectiveStartCmd}`, 'info', 'STARTUP')
 
                 await this.executeRemoteCommandWithRetry(
                   conn,
-                  project.startCommand,
+                  effectiveStartCmd,
                   containerName,
                   log,
                   'STARTUP'
@@ -1476,6 +1564,12 @@ class PipelineManager {
       if (project.envVars && project.envVars.length > 0) {
         log(`[00:06] 注入环境变量: ${project.envVars.map((e) => `${e.key}=${e.isSecret ? '******' : e.value}`).join(', ')}`, 'info', 'BUILD')
       }
+      if (project.dockerBuildArgs && project.dockerBuildArgs.length > 0) {
+        const validArgs = project.dockerBuildArgs.filter(arg => arg.key && arg.value)
+        if (validArgs.length > 0) {
+          log(`[00:06] 【Docker 构建参数】注入 ${validArgs.length} 个 ARG: ${validArgs.map(a => `${a.key}=${a.value}`).join(', ')}`, 'info', 'BUILD')
+        }
+      }
       log(`[00:06] ✓ 校验项目根目录规范: 已识别根目录下标准 Dockerfile 容器化镜像构建文件`, 'success', 'BUILD')
       if (deployment.versionTag) {
         const baseName = this.extractDockerBaseImageName(project.buildCommand || 'docker build -t app:latest .', project.name)
@@ -1505,7 +1599,7 @@ class PipelineManager {
         id: project.serverId || 'srv-sim',
         name: project.serverName,
         ip: project.serverIp,
-        port: project.port,
+        port: 22,
         user: 'root',
         authType: 'password',
         status: 'online',
@@ -1531,19 +1625,36 @@ class PipelineManager {
     if (isNativeSim) {
       const plugin = getRuntime(project.runtime)
       const procManager = plugin?.nativeProcessManager || '原生系统进程'
+      if (project.envVars && project.envVars.length > 0) {
+        log(`[00:10] 原生模式: 已按系统配置环境变量 (export 与 .env): ${project.envVars.map((e) => `${e.key}=${e.isSecret ? '******' : e.value}`).join(', ')}`, 'info', 'STARTUP')
+      }
       log(`[00:10] SSH 远程执行原生启动指令: ${project.startCommand || 'npm start'}`, 'info', 'STARTUP')
       await this.sleep(1400, abortController.signal)
-      log(`[00:11] ✓ 原生服务进程重载成功 (${procManager}已托管)，监听端口 :${project.port}`, 'success', 'STARTUP')
+      const portsDisplay =
+        project.serverPort && project.serverPort.length > 0
+          ? project.serverPort.map((p) => `:${p}`).join(' ')
+          : ':3000'
+      log(`[00:11] ✓ 原生服务进程重载成功 (${procManager}已托管)，监听端口 ${portsDisplay}`, 'success', 'STARTUP')
     } else {
-      const simContainerName = this.extractDockerContainerName(project.startCommand)
+      const effectiveStartCmd = updateDockerRunEnvVars(project.startCommand || 'docker run ...', project.envVars)
+      const simContainerName = this.extractDockerContainerName(effectiveStartCmd)
       if (simContainerName) {
         log(`[00:10] 检测到 Docker 容器命名 [${simContainerName}]，正在平滑停止并清理已存在同名旧容器...`, 'info', 'STARTUP')
         await this.sleep(800, abortController.signal)
         log(`[00:10] ✓ 已安全清理旧容器 [${simContainerName}]，准备启动新版本容器`, 'success', 'STARTUP')
       }
-      log(`[00:10] SSH 远程执行启动指令: ${project.startCommand || 'npm start'}`, 'info', 'STARTUP')
+      if (project.envVars && project.envVars.length > 0) {
+        log(`[00:10] Docker 容器模式: 环境变量已加入 -e 参数: ${project.envVars.map((e) => `${e.key}=${e.isSecret ? '******' : e.value}`).join(', ')}`, 'info', 'STARTUP')
+      }
+      log(`[00:10] SSH 远程执行启动指令: ${effectiveStartCmd}`, 'info', 'STARTUP')
       await this.sleep(1400, abortController.signal)
-      log(`[00:11] ✓ 服务进程重载成功，PID 已分配，监听端口 :${project.port}`, 'success', 'STARTUP')
+      const portsDisplay =
+        project.portMappings && project.portMappings.length > 0
+          ? project.portMappings.map((m) => `:${m.host}➔:${m.container}`).join(' ')
+          : project.serverPort && project.serverPort.length > 0
+          ? project.serverPort.map((p) => `:${p}`).join(' ')
+          : ':3000'
+      log(`[00:11] ✓ 服务进程重载成功，PID 已分配，监听端口 ${portsDisplay}`, 'success', 'STARTUP')
     }
 
     if (abortController.signal.aborted) return

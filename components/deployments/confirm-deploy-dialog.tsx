@@ -12,6 +12,7 @@ import {
   Terminal,
   Activity,
   AlertTriangle,
+  FileCode,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Project } from '@/lib/types'
@@ -102,7 +103,11 @@ export function ConfirmDeployDialog({
                 <Activity className="size-3.5 text-emerald-400 shrink-0" />
                 <span>端口:</span>
                 <span className="font-mono font-medium text-foreground truncate">
-                  :{project.port}
+                  {project.deployTargetMode === 'docker' && project.portMappings && project.portMappings.length > 0
+                    ? project.portMappings.map((m) => `:${m.host}➔:${m.container}`).join(' ')
+                    : project.serverPort && project.serverPort.length > 0
+                    ? project.serverPort.map((p) => `:${p}`).join(' ')
+                    : ':3000'}
                 </span>
               </div>
             </div>
@@ -112,6 +117,16 @@ export function ConfirmDeployDialog({
               <span>部署路径:</span>
               <span className="font-mono text-foreground truncate">{project.deployPath}</span>
             </div>
+
+            {!isNative && project.dockerBuildArgs && project.dockerBuildArgs.filter(a => a.key && a.value).length > 0 && (
+              <div className="pt-2 border-t border-border/40 text-[11px] flex items-center gap-2 text-muted-foreground">
+                <FileCode className="size-3.5 shrink-0 text-violet-400" />
+                <span>构建参数:</span>
+                <span className="font-mono text-violet-300 truncate">
+                  {project.dockerBuildArgs.filter(a => a.key && a.value).map(a => `${a.key}=${a.value}`).join(', ')}
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Delivery Note */}

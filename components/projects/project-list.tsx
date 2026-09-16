@@ -708,7 +708,11 @@ export function ProjectList({
                   服务端口 / 路径
                 </div>
                 <p className="font-mono text-foreground font-medium">
-                  :{project.port}
+                  {project.deployTargetMode === 'docker' && project.portMappings && project.portMappings.length > 0
+                    ? project.portMappings.map((m) => `:${m.host}➔:${m.container}`).join(' ')
+                    : project.serverPort && project.serverPort.length > 0
+                    ? project.serverPort.map((p) => `:${p}`).join(' ')
+                    : ':3000'}
                 </p>
                 <p className="text-[11px] text-muted-foreground font-mono truncate">
                   {project.deployPath}

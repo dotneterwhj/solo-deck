@@ -39,6 +39,7 @@
    - 每个运行时插件自完备封装了：
      - 原生目标机部署配置：`defaultNativeInstallCmd`, `defaultNativeBuildCmd`, `defaultNativeStartCmd`, `requiredNativeTools`, `nativeProcessManager`, `nativeRequirementDesc`
      - 容器化部署配置：`dockerfileTemplate`, `dockerignoreTemplate`, `baseImage`, `requiredDockerTools`（其中 Node.js 采用 Next.js Standalone 极致瘦身模板，将生产镜像由 800MB+ 压减至 ~100MB，支持一键切换传统 Express/NestJS）
+     - Docker 构建参数声明（可选）：`dockerBuildArgs`（`DockerBuildArgDefinition[]`），运行时可声明 Dockerfile 中的 `ARG` 参数定义（如 ASP.NET Core 的 `PROJECT` .csproj 路径与 `DOTNET_VERSION` SDK 版本号），用户在创建流水线向导或项目详情中填写参数值，流水线引擎自动在 `docker build` 时注入 `--build-arg KEY=VALUE`
    - 极简可扩展：增加新语言运行时仅需编写单个独立插件类并注册，前端向导、详情配置、环境变量预设、Dockerfile 指南及流水线自动适配生效。
 3. **分发模式**：
    - **Docker 容器分发**：
@@ -103,6 +104,7 @@ cdpipeline/
 │   ├── api/                          # 后端 API 路由 (RESTful + SSE)
 │   │   ├── auth/                     # 登录鉴权 (login, logout, me)
 │   │   ├── deployments/              # 部署触发、详情、回滚、取消与 /stream (SSE)
+│   │   ├── notifications/            # 系统通知列表、单条及批量标记已读与清空 (/[id])
 │   │   ├── projects/                 # 项目增删改查、克隆([id]/clone)及健康探针
 │   │   ├── servers/                  # 主机节点增删改查、SSH 连通测试、环境检测与远程安装
 │   │   ├── settings/                 # 全局系统设置与清理 (/cleanup)
@@ -117,6 +119,7 @@ cdpipeline/
 │   ├── dashboard/                    # 大盘与概览视图 (dashboard-overview)
 │   ├── projects/                     # 项目流水线 (project-list, project-detail-modal, new-project-wizard, clone-project-modal)
 │   ├── deployments/                  # 构建部署与终端 (deploy-modal, confirm-deploy-dialog, preflight-env-dialog)
+│   ├── notifications/                # 系统通知与右上角浮层 (notification-popover)
 │   ├── servers/                      # 服务器与节点 (server-management, server-env-modal)
 │   ├── settings/                     # 全局系统设置 (system-settings)
 │   ├── guides/                       # 指引与帮助 (dockerfile-guide-modal, help-modal)
@@ -140,6 +143,7 @@ cdpipeline/
 │   ├── shell-env.ts                  # SSH 远程命令环境加载与包裹包装
 │   ├── env-presets.ts                # 各语言环境变量模板预设代理
 │   ├── time-utils.ts                 # 时间格式化工具
+│   ├── validators.ts                 # 项目命名规范与通用数据校验器
 │   └── utils.ts                      # 通用工具函数 (如 cn())
 ├── config/
 │   └── auth.json                     # 🔐 系统登录账号密码及鉴权配置文件
@@ -178,6 +182,7 @@ cdpipeline/
      - 容器化构建配置：
        - `dockerfileTemplate`: 标准多阶段构建 Dockerfile 模板
        - `dockerignoreTemplate`: `.dockerignore` 模板
+       - `dockerBuildArgs`（可选）: Docker 构建参数定义列表（`DockerBuildArgDefinition[]`），对应 Dockerfile 中的 ARG 指令；声明后前端向导与项目详情自动呈现参数填写表单，流水线引擎在 `docker build` 时自动注入 `--build-arg`。示例参考 ASP.NET Core 插件的 `PROJECT` 与 `DOTNET_VERSION` 参数。
      - `sampleEnvVars`: 默认环境变量预设列表
   3. 若需自定义特定命令逻辑，可覆写 `getBuildCommand` 或 `getStartCommand`。
   4. 在 `lib/runtimes/index.ts` 中实例化并调用 `registerRuntime(new YourRuntimePlugin())`。
@@ -207,8 +212,63 @@ cdpipeline/
 - **安全防篡改会话**：基于 HMAC-SHA256 签名生成安全的 `cdpipeline_session` 会话 Cookie（`HttpOnly`, `SameSite: Lax`），使用常量时间比对（`timingSafeEqual`）防范时序侧信道攻击。
 - **自动化免阻断**：外部 Git Webhook 推送接口（`/api/webhooks/[projectId]`）与健康检查探针不受前端会话拦截，确保自动化流水线顺畅执行。
 
-### 7. 编码风格与质量检查
+### 7. 系统通知与多维事件驱动规范 (`lib/db.ts`, `app/api/notifications/`, `components/notifications/`)
+- **数据结构与字段规范**：系统通知统一使用 `SystemNotification` 接口定义，包含 `id, type, level, title, message, read, createdAt, metadata`；类型 `type` 包含 `deployment | health_check | server | cleanup | project | system`，级别 `level` 包含 `info | success | warning | error`。
+- **存储与滚动修剪**：所有通知统一通过 `lib/db.ts` 的 `createNotification` 创建，内置内存与原子写入；为保障持久化性能，默认实施容量保护（最大保留 200 条，超出自动淘汰最旧的历史数据）。
+- **事件全生命周期埋点覆盖**：
+  - 流水线引擎 (`lib/pipeline-runner.ts`)：在部署成功、异常失败、手动取消时派发对应通知。
+  - 心跳健康探针 (`lib/health-checker.ts`)：在服务探测状态由 Healthy 转为 Unhealthy（告警）或自愈恢复正常（恢复）时派发通知。
+  - 主机生命周期 (`app/api/servers/`)：在服务器新增、更新、删除及网络连通性异常失联或上线时派发通知。
+  - 产物与镜像清理 (`lib/cleanup-service.ts`)：在定时任务与手动触发执行后，派发包含清理文件数与释放空间的通知。
+  - 项目流水线克隆 (`app/api/projects/[id]/clone/route.ts`)：在克隆成功时派发通知。
+- **交互与终端全域联动**：前端 Popover 浮层支持未读徽标计数、分类过滤 Tab、单条点击标记已读并精准跳转对应部署终端或功能视图、一键全部已读与一键清空。
+
+### 8. 编码风格与质量检查
 - 严格遵循 TypeScript 类型约束，避免滥用 `any`。
 - 样式推荐使用 Tailwind CSS 原子类，动态拼接类名统一使用 `cn()`。
 - 完成功能修改或修复后，务必运行 `npx tsc --noEmit` 进行类型验证，并检查 `npm run build` 确保没有构建破坏。
 - **每次有功能新增或变更时，必须同步更新 `AGENTS.md` 与 `README.md`。**
+
+### 9. 项目名称命名规范与校验约定 (`lib/validators.ts`)
+- **命名规范准则**：
+  - **允许字符**：只能包含小写英文字母 (`a-z`)、数字 (`0-9`)、短横线 (`-`) 及下划线 (`_`)。
+  - **首字符约束**：**严禁以数字开头**（首字符限定为小写字母、短横线或下划线）。
+  - **空格约束**：**严禁包含空格**。
+  - **正则表达式规范**：`^[a-z_-][a-z0-9_-]*$`。
+- **全链路双端防御机制**：
+  - **服务端 (API)**：`POST /api/projects`（新建）、`PUT /api/projects/[id]`（修改）以及 `POST /api/projects/[id]/clone`（克隆）统一接入 `validateProjectName`，针对空值、包含空格、数字开头、含非法大写/特殊字符分别抛出精准可读的 HTTP 400 错误提示。
+  - **客户端 (UI)**：新建项目向导（`new-project-wizard.tsx` Step 1）、项目详情编辑（`project-detail-modal.tsx` Overview Tab）以及流水线克隆弹窗（`clone-project-modal.tsx`）均集成实时格式校验、输入红框警示、错误信息说明与规范说明文案，并阻断不合规操作提交。
+
+### 10. 环境变量全流程管理与载体自适应注入规范 (Environment Variables)
+- **双载体自适应差异化注入**：
+  - **Docker 容器交付模式**：
+    - 使用 `formatDockerEnvArgs` 与 `updateDockerRunEnvVars`（`lib/runtimes/base.ts`）自动将环境变量数组格式化并安全注入至启动命令（`docker run -d -p <port>:<port> -e KEY="VALUE" ... --name <name> <image>`）。
+    - 提供了严格的正则表达式清洗循环机制，避免重复注入或遗留旧的 `-e` / `--env` 标记，保持命令整洁。
+  - **Native 原生宿主机交付模式**：
+    - **系统会话注入**：在执行启动命令前，流水线通过组合环境变量链 `export KEY="VALUE" && ...` 包裹派发启动脚本，使 PM2、Gunicorn、CLR 或独立二进制可直接读取系统环境变量。
+    - **应用级持久配置**：流水线通过 SFTP 或本地文件写入在目标部署路径 `${project.deployPath}/.env` 自动落盘配置内容，使标准 dotenv 框架开箱即读。
+- **新建项目向导与项目详情全流程交互 (`new-project-wizard.tsx`, `project-detail-modal.tsx`)**：
+  - 流程标准化扩展为 6 步：`基本信息` ➔ `Git 仓库` ➔ `运行时 & 构建` ➔ `环境变量` ➔ `目标主机` ➔ `确认配置`。
+  - 支持一键从选中的技术栈插件导入推荐预设（`sampleEnvVars`），支持自定义键值对与敏感数据保密掩码（Eye/EyeOff）。
+  - **环境变量与启动指令实时双向联动**：在项目详情弹窗的【环境变量】Tab 中，对变量的增、删、改或一键导入预设，均会实时自动联动更新 `startCommand`（在 Docker 模式下动态清洗并重新生成 `-e KEY="VALUE"` 注入参数），并在环境变量配置区提供启动指令与环境变量联动实时预览卡片。
+  - **Step 6 确认配置页集成最终指令预览 (Command Preview)**：提供独立、高对比度终端卡片，清晰呈现最终将在流水线中实际执行的编译构建命令（`buildCommand`）与服务启动/进程拉起命令（`startCommand`），附带一键复制能力，让用户在最终提交创建前对执行指令一目了然。
+
+### 11. 多端口与 Docker 容器端口映射规范 (Multi-Port & Port Mapping Architecture)
+- **数据结构与字段类型 (`lib/types.ts`)**：
+  - `Project` 实体服务监听端口统一采用 `serverPort: number[]`（宿主机外部暴露端口列表），并支持扩展配置 `containerPort?: number[]`（容器内部应用端口列表）与 `portMappings?: PortMapping[]`（`{ host: number; container: number }[]` 映射对）。
+- **服务端持久化与自适应同步 (`lib/db.ts`, `app/api/projects/`)**：
+  - `enrichProjectWithLatestDeployment` 自动对历史项目向下兼容补全 `containerPort` 与 `portMappings`（缺省时自动对齐 `serverPort`，生成 1:1 映射），并在读取历史旧数据中的 `port` 字段时自动转换为 `serverPort: [port]`。
+  - `createProject` 与 `updateProject` 自动维护 `portMappings`、`serverPort` 与 `containerPort` 的三向同步；`POST /api/projects`、`PUT /api/projects/[id]` 与克隆 API 全面支持接收和持久化端口映射数据。
+- **容器与原生自适应指令编排 (`lib/runtimes/base.ts`, `lib/pipeline-runner.ts`)**：
+  - **Docker 容器模式**：
+    - 支持宿主机端口与容器端口独立自定义映射（例如宿主机 `8080` ➔ 容器内部 `3000`，生成 `-p 8080:3000`）。
+    - 容器内部应用监听端口（`containerPort[0]`）自动同步联动至容器内的 `PORT` 环境变量，而宿主机外部端口供反向代理与心跳探针直接访问。
+    - `updateDockerRunPorts` 与 `extractPortMappingsFromCommand` 全面支持解析并替换多段 `-p host:container` 映射。
+  - **Native 原生模式**：
+    - 直接在宿主机监听 `serverPort`，首个主端口自动作为 `PORT` 环境变量注入系统与应用进程。
+  - **部署日志与状态反馈**：部署控制台与终端高亮显示端口映射关系（如 `:8080➔:3000` 或多端口 `:8080➔:3000 :8443➔:3001`）。
+- **全流程交互与界面呈现**：
+  - **新建向导 (`new-project-wizard.tsx`)**：Step 4 区分载体模式呈现：Docker 模式下提供结构化端口映射配置表（支持增删映射行、独立输入宿主机端口与容器端口、实时渲染 `-p host:container` 徽标），原生模式下提供简洁的逗号分隔宿主机监听端口输入框；Step 5 确认页与探针占位智能对齐。
+  - **项目详情编辑 (`project-detail-modal.tsx`)**：概览 Tab 针对 Docker 项目呈现独立的端口映射增删与实时编辑组件，针对 Native 项目提供宿主机端口输入，指令联动全部通过 `currentPlugin.getStartCommand` 驱动。
+  - **流水线克隆 (`clone-project-modal.tsx`)**：完整继承并支持修改源项目的端口映射配置，同机部署智能检测宿主机端口冲突。
+  - **项目卡片与确认弹窗 (`project-list.tsx`, `confirm-deploy-dialog.tsx`)**：直观展示多端口及 Docker 容器映射（如 `:8080➔:3000`）。

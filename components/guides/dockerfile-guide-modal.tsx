@@ -28,14 +28,12 @@ interface DockerfileGuideModalProps {
   isOpen: boolean
   onClose: () => void
   initialTemplateId?: string
-  onApplyTemplate?: (template: DockerfileTemplate) => void
 }
 
 export function DockerfileGuideModal({
   isOpen,
   onClose,
-  initialTemplateId,
-  onApplyTemplate,
+  initialTemplateId
 }: DockerfileGuideModalProps) {
   // Find matching initial template or default to nodejs
   const defaultSelected =
@@ -143,11 +141,10 @@ export function DockerfileGuideModal({
                     key={tmpl.id}
                     type="button"
                     onClick={() => setSelectedTemplate(tmpl)}
-                    className={`p-2.5 rounded-lg border text-left transition-all relative ${
-                      isSelected
-                        ? 'border-blue-500 bg-blue-500/10 text-foreground font-medium shadow-xs ring-1 ring-blue-500/30'
-                        : 'border-border hover:border-border/80 bg-card hover:bg-muted/40 text-muted-foreground'
-                    }`}
+                    className={`p-2.5 rounded-lg border text-left transition-all relative ${isSelected
+                      ? 'border-blue-500 bg-blue-500/10 text-foreground font-medium shadow-xs ring-1 ring-blue-500/30'
+                      : 'border-border hover:border-border/80 bg-card hover:bg-muted/40 text-muted-foreground'
+                      }`}
                   >
                     <p className="text-xs font-semibold truncate">{tmpl.name}</p>
                     <p className="text-[10px] text-muted-foreground mt-0.5">
@@ -168,11 +165,10 @@ export function DockerfileGuideModal({
               <button
                 type="button"
                 onClick={() => setActiveTab('dockerfile')}
-                className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors flex items-center gap-1.5 ${
-                  activeTab === 'dockerfile'
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}
+                className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors flex items-center gap-1.5 ${activeTab === 'dockerfile'
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+                  }`}
               >
                 <FileCode className="size-3.5" />
                 Dockerfile 模板源码
@@ -180,11 +176,10 @@ export function DockerfileGuideModal({
               <button
                 type="button"
                 onClick={() => setActiveTab('dockerignore')}
-                className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors flex items-center gap-1.5 ${
-                  activeTab === 'dockerignore'
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}
+                className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors flex items-center gap-1.5 ${activeTab === 'dockerignore'
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+                  }`}
               >
                 <ShieldCheck className="size-3.5" />
                 .dockerignore 建议配置
@@ -192,11 +187,10 @@ export function DockerfileGuideModal({
               <button
                 type="button"
                 onClick={() => setActiveTab('guide')}
-                className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors flex items-center gap-1.5 ${
-                  activeTab === 'guide'
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}
+                className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors flex items-center gap-1.5 ${activeTab === 'guide'
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+                  }`}
               >
                 <FolderTree className="size-3.5" />
                 项目文件夹放置指引与 Git 提交
@@ -304,6 +298,38 @@ export function DockerfileGuideModal({
                 </pre>
               </div>
 
+              {/* Build Args Callout (if declared) */}
+              {selectedTemplate.dockerBuildArgs && selectedTemplate.dockerBuildArgs.length > 0 && (
+                <div className="p-3 rounded-lg border border-violet-500/30 bg-violet-500/5 space-y-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    <FileCode className="size-4 text-violet-400" />
+                    <span className="font-semibold text-foreground">
+                      构建参数声明 (Dockerfile ARG)
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-violet-500/20 text-violet-300">
+                      支持在创建流水线或项目详情中自定义指定
+                    </span>
+                  </div>
+                  <div className="space-y-1.5 pl-6">
+                    {selectedTemplate.dockerBuildArgs.map((argDef) => (
+                      <div key={argDef.key} className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                        <code className="text-violet-400 font-mono font-bold">{argDef.key}</code>
+                        {argDef.required && <span className="text-destructive font-bold">[必填]</span>}
+                        {argDef.defaultValue && (
+                          <span className="text-[10px] px-1 rounded bg-muted font-mono text-muted-foreground">
+                            默认: {argDef.defaultValue}
+                          </span>
+                        )}
+                        <span>— {argDef.description}</span>
+                        {argDef.placeholder && (
+                          <span className="text-muted-foreground/60 font-mono">({argDef.placeholder})</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Key Features Callout */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
                 {selectedTemplate.keyFeatures.map((feat, idx) => (
@@ -369,7 +395,7 @@ export function DockerfileGuideModal({
                     标准项目根目录结构图示
                   </div>
                   <pre className="p-3 rounded bg-muted/30 border border-border font-mono text-xs text-neutral-300 leading-relaxed overflow-x-auto">
-{`your-project-repository/
+                    {`your-project-repository/
 ├── 📄 Dockerfile           <-- [关键] 必须位于此处 (无后缀)
 ├── 📄 .dockerignore        <-- [建议] 过滤不需要打包的文件
 ├── 📄 package.json         <-- (或 pom.xml / requirements.txt)
@@ -392,7 +418,7 @@ export function DockerfileGuideModal({
                   </p>
                   <div className="relative rounded bg-black/50 border border-border p-3">
                     <pre className="font-mono text-xs text-emerald-400 overflow-x-auto">
-{`# 1. 将文件添加至 Git 暂存区
+                      {`# 1. 将文件添加至 Git 暂存区
 git add Dockerfile .dockerignore
 
 # 2. 提交更改
@@ -460,19 +486,6 @@ git push origin main`}
           </div>
 
           <div className="flex items-center gap-2">
-            {onApplyTemplate && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  onApplyTemplate(selectedTemplate)
-                  onClose()
-                }}
-                className="text-xs"
-              >
-                选用此模板配置 (端口 {selectedTemplate.defaultPort})
-              </Button>
-            )}
             <Button size="sm" onClick={onClose} className="text-xs">
               我已知晓并关闭
             </Button>

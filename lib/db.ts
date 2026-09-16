@@ -9,6 +9,7 @@ import {
   DeployLogEntry,
   SystemNotification,
   NotificationType,
+  PortMapping,
 } from './types'
 
 interface DatabaseSchema {
@@ -126,7 +127,7 @@ const SEED_PROJECTS: Project[] = [
     status: 'active',
     serverIp: '192.168.1.100',
     serverName: '生产服务器1(虚拟)',
-    port: 3000,
+    serverPort: [3000],
     deployPath: '/opt/apps/api-service',
     installCommand: 'npm install',
     buildCommand: 'docker build -t api-service:latest .',
@@ -158,7 +159,7 @@ const SEED_PROJECTS: Project[] = [
     status: 'active',
     serverIp: '192.168.1.101',
     serverName: '数据服务器(虚拟)',
-    port: 5000,
+    serverPort: [5000],
     deployPath: '/opt/apps/data-engine',
     installCommand: 'pip install -r requirements.txt',
     buildCommand: 'docker build -t data-engine:latest .',
@@ -189,7 +190,7 @@ const SEED_PROJECTS: Project[] = [
     status: 'active',
     serverIp: '192.168.1.102',
     serverName: '应用服务器(虚拟)',
-    port: 8080,
+    serverPort: [8080],
     deployPath: '/opt/apps/admin-panel',
     installCommand: 'dotnet restore',
     buildCommand: 'docker build -t admin-panel:latest .',
@@ -198,6 +199,10 @@ const SEED_PROJECTS: Project[] = [
     runnerMode: 'simulation',
     envVars: [
       { key: 'ASPNETCORE_ENVIRONMENT', value: 'Production' },
+    ],
+    dockerBuildArgs: [
+      { key: 'PROJECT', value: 'src/AdminPanel/AdminPanel.csproj' },
+      { key: 'DOTNET_VERSION', value: '8.0' },
     ],
     lastDeployed: '2026-03-09T08:00:00.000Z',
     lastCommitHash: 'e3b8901',
@@ -220,7 +225,7 @@ const SEED_PROJECTS: Project[] = [
     status: 'stopped',
     serverIp: '192.168.1.103',
     serverName: '微服务集群1(虚拟)',
-    port: 3001,
+    serverPort: [3001],
     deployPath: '/opt/apps/user-service',
     installCommand: 'pnpm install',
     buildCommand: 'docker build -t user-service:latest .',
@@ -439,8 +444,32 @@ export function enrichProjectWithLatestDeployment(
     }
   }
 
+  const serverPort: number[] =
+    Array.isArray(project.serverPort) && project.serverPort.length > 0
+      ? project.serverPort.map(Number).filter((p) => !isNaN(p) && p > 0)
+      : (project as any).port
+      ? [Number((project as any).port)]
+      : [3000]
+
+  const containerPort: number[] =
+    Array.isArray(project.containerPort) && project.containerPort.length > 0
+      ? project.containerPort.map(Number).filter((p) => !isNaN(p) && p > 0)
+      : Array.isArray(project.portMappings) && project.portMappings.length > 0
+      ? project.portMappings.map((m) => Number(m.container)).filter((p) => !isNaN(p) && p > 0)
+      : [...serverPort]
+
+  const portMappings: PortMapping[] =
+    Array.isArray(project.portMappings) && project.portMappings.length > 0
+      ? project.portMappings
+          .map((m) => ({ host: Number(m.host), container: Number(m.container) }))
+          .filter((m) => !isNaN(m.host) && !isNaN(m.container) && m.host > 0 && m.container > 0)
+      : serverPort.map((sp, idx) => ({ host: sp, container: containerPort[idx] || sp }))
+
   return {
     ...project,
+    serverPort,
+    containerPort,
+    portMappings,
     deployTargetMode: project.deployTargetMode || 'docker',
     serverTags,
     lastCommitHash,
@@ -473,6 +502,39 @@ export function createProject(data: Omit<Project, 'id' | 'createdAt' | 'updatedA
       s.name === data.serverName
   )
 
+  let serverPort: number[] = []
+  let containerPort: number[] = []
+  let portMappings: PortMapping[] = []
+
+  if (Array.isArray(data.portMappings) && data.portMappings.length > 0) {
+    portMappings = data.portMappings
+      .map((m) => ({ host: Number(m.host), container: Number(m.container) }))
+      .filter((m) => !isNaN(m.host) && !isNaN(m.container) && m.host > 0 && m.container > 0)
+  }
+
+  if (portMappings.length > 0) {
+    serverPort = portMappings.map((m) => m.host)
+    containerPort = portMappings.map((m) => m.container)
+  } else {
+    serverPort =
+      Array.isArray(data.serverPort) && data.serverPort.length > 0
+        ? data.serverPort.map(Number).filter((p) => !isNaN(p) && p > 0)
+        : (data as any).port
+        ? [Number((data as any).port)]
+        : [3000]
+    if (serverPort.length === 0) serverPort = [3000]
+
+    containerPort =
+      Array.isArray(data.containerPort) && data.containerPort.length > 0
+        ? data.containerPort.map(Number).filter((p) => !isNaN(p) && p > 0)
+        : [...serverPort]
+
+    portMappings = serverPort.map((sp, idx) => ({
+      host: sp,
+      container: containerPort[idx] || sp,
+    }))
+  }
+
   const isUnconfigured = !data.healthCheckUrl || !data.healthCheckUrl.trim()
   const healthStatus = data.healthStatus || (isUnconfigured ? 'unconfigured' : 'healthy')
   const lastHealthCheck =
@@ -490,6 +552,9 @@ export function createProject(data: Omit<Project, 'id' | 'createdAt' | 'updatedA
 
   const newProject: Project = {
     ...data,
+    serverPort,
+    containerPort,
+    portMappings,
     deployTargetMode: data.deployTargetMode || 'docker',
     serverTags: data.serverTags || srv?.tags || [],
     healthStatus,
@@ -518,6 +583,40 @@ export function updateProject(id: string, updates: Partial<Project>): Project | 
         checkedAt: new Date().toISOString(),
       }
     }
+  }
+
+  // 规范化多端口与容器端口映射更新逻辑
+  if (updates.portMappings !== undefined) {
+    const rawMappings = Array.isArray(updates.portMappings) ? updates.portMappings : []
+    const validMappings = rawMappings
+      .map((m) => ({ host: Number(m.host), container: Number(m.container) }))
+      .filter((m) => !isNaN(m.host) && !isNaN(m.container) && m.host > 0 && m.container > 0)
+    if (validMappings.length > 0) {
+      updates.portMappings = validMappings
+      updates.serverPort = validMappings.map((m) => m.host)
+      updates.containerPort = validMappings.map((m) => m.container)
+    }
+  } else if (updates.serverPort !== undefined || updates.containerPort !== undefined) {
+    if (updates.serverPort !== undefined) {
+      const rawPorts = Array.isArray(updates.serverPort)
+        ? updates.serverPort
+        : [Number(updates.serverPort)]
+      const validPorts = rawPorts.map(Number).filter((p) => !isNaN(p) && p > 0)
+      updates.serverPort = validPorts.length > 0 ? validPorts : [3000]
+    }
+    if (updates.containerPort !== undefined) {
+      const rawCPorts = Array.isArray(updates.containerPort)
+        ? updates.containerPort
+        : [Number(updates.containerPort)]
+      const validCPorts = rawCPorts.map(Number).filter((p) => !isNaN(p) && p > 0)
+      updates.containerPort = validCPorts.length > 0 ? validCPorts : (updates.serverPort || [3000])
+    }
+    const currentHosts = updates.serverPort || db.projects[index].serverPort || [3000]
+    const currentContainers = updates.containerPort || db.projects[index].containerPort || currentHosts
+    updates.portMappings = currentHosts.map((sp, idx) => ({
+      host: sp,
+      container: currentContainers[idx] || sp,
+    }))
   }
 
   db.projects[index] = {

@@ -1,11 +1,21 @@
 import { BaseRuntimePlugin } from '../base'
-import { RuntimeEnvVarPreset, DeployTargetMode } from '../types'
+import { RuntimeEnvVarPreset, DeployTargetMode, PortMapping } from '../types'
 
 export class PythonRuntimePlugin extends BaseRuntimePlugin {
-  override getStartCommand(projectName?: string, port?: number, options?: { mode?: DeployTargetMode; versionTag?: string }): string {
+  override getStartCommand(
+    projectName?: string,
+    port?: number | number[] | PortMapping[],
+    options?: {
+      mode?: DeployTargetMode
+      versionTag?: string
+      envVars?: { key: string; value: string }[]
+      containerPort?: number | number[]
+      portMappings?: PortMapping[]
+    }
+  ): string {
     const mode = options?.mode || 'docker'
     if (mode === 'native') {
-      const p = port || this.defaultPort
+      const p = this.extractNativePort(port)
       return `gunicorn -w 4 -b 0.0.0.0:${p} main:app --daemon || gunicorn -w 4 -b 0.0.0.0:${p} app:app --daemon`
     }
     return super.getStartCommand(projectName, port, options)

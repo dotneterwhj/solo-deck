@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getProjectById, updateProject, deleteProject } from '@/lib/db'
+import { validateProjectName } from '@/lib/validators'
 
 export async function GET(
   req: NextRequest,
@@ -24,6 +25,17 @@ export async function PUT(
   try {
     const { id } = await context.params
     const body = await req.json()
+
+    if (body.name !== undefined) {
+      const nameValidation = validateProjectName(body.name)
+      if (!nameValidation.valid) {
+        return NextResponse.json(
+          { error: nameValidation.error },
+          { status: 400 }
+        )
+      }
+    }
+
     const updated = updateProject(id, body)
     if (!updated) {
       return NextResponse.json({ error: '项目未找到' }, { status: 404 })

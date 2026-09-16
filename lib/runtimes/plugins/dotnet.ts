@@ -1,10 +1,20 @@
 import { BaseRuntimePlugin, toSafeSlug } from '../base'
-import { RuntimeEnvVarPreset } from '../types'
+import { RuntimeEnvVarPreset, DockerBuildArgDefinition, DeployTargetMode, PortMapping } from '../types'
 
 export class DotnetRuntimePlugin extends BaseRuntimePlugin {
-  override getStartCommand(projectName?: string, port?: number, options?: { mode?: 'docker' | 'native'; versionTag?: string }): string {
+  override getStartCommand(
+    projectName?: string,
+    port?: number | number[] | PortMapping[],
+    options?: {
+      mode?: DeployTargetMode
+      versionTag?: string
+      envVars?: { key: string; value: string }[]
+      containerPort?: number | number[]
+      portMappings?: PortMapping[]
+    }
+  ): string {
     if (options?.mode === 'native') {
-      const p = port || this.defaultPort
+      const p = this.extractNativePort(port)
       const slug = projectName ? toSafeSlug(projectName) : 'app'
       return `ASPNETCORE_URLS=http://0.0.0.0:${p} dotnet ./publish/${slug}.dll || ASPNETCORE_URLS=http://0.0.0.0:${p} dotnet ./publish/app.dll || dotnet ./publish/*.dll`
     }
@@ -23,8 +33,25 @@ export class DotnetRuntimePlugin extends BaseRuntimePlugin {
   readonly requiredNativeTools = ['dotnet']
   override readonly nativeProcessManager = 'ASP.NET Core / .NET CLR 进程'
   override readonly nativeRequirementDesc = '目标服务器需安装 ASP.NET Core Runtime (.NET 8.0/7.0) 运行环境。'
+
+  /** Docker 构建参数定义：PROJECT (.csproj 路径) 与 DOTNET_VERSION (SDK/Runtime 版本) */
+  override readonly dockerBuildArgs: DockerBuildArgDefinition[] = [
+    {
+      key: 'PROJECT',
+      description: '项目 .csproj 文件相对路径 (相对于代码仓库根目录)',
+      required: true,
+      placeholder: 'src/MyApp/MyApp.csproj',
+    },
+    {
+      key: 'DOTNET_VERSION',
+      defaultValue: '8.0',
+      description: '.NET SDK / Runtime 版本号',
+      placeholder: '8.0',
+    },
+  ]
   readonly keyFeatures = [
     '多阶段构建: SDK 打包发布 ➔ 纯轻量 ASP.NET Core 运行镜像',
+    '通用化模板: 支持声明 ARG PROJECT (.csproj 路径) 与 ARG DOTNET_VERSION 版本',
     '支持多项目 .sln 解决方案 (多 .csproj 分布于不同子目录)',
     'NuGet 依赖层优先缓存，加快重复构建速度',
     '时区配置与默认 8080 端口绑定',
@@ -36,56 +63,52 @@ export class DotnetRuntimePlugin extends BaseRuntimePlugin {
 
   readonly dockerfileTemplate = `# ===================================================
 # .NET (ASP.NET Core) 企业级生产模板
-# 适用: C# .NET 8.0 / 7.0 Web API 与微服务
 # 支持: 多项目 .sln 解决方案 (多 .csproj 分布于不同子目录)
 # 放置路径: 代码仓库根目录 / Dockerfile (与 *.sln 同级)
 # ===================================================
 
 # 阶段 1: 编译与发布
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS builder
-WORKDIR /source
+ARG DOTNET_VERSION=8.0
+FROM mcr.microsoft.com/dotnet/sdk:\${DOTNET_VERSION} AS builder
+WORKDIR /src
 
-# 1. 先复制 .sln 与 NuGet 配置
-COPY *.sln ./
-COPY NuGet.Config* nuget.config* ./
+ARG PROJECT
 
-# 2. 复制所有 .csproj 并保留目录结构 (支持多项目解决方案)
-#    这一步将各子目录的 .csproj 原样映射到构建上下文中，
-#    使 dotnet restore 能正确解析 .sln 中的项目引用关系。
-COPY **/*.csproj ./tmp/
-RUN for file in ./tmp/*.csproj; do \\
-      dir=$(basename "$file" .csproj); \\
-      mkdir -p "$dir"; \\
-      mv "$file" "$dir/"; \\
-    done && rm -rf ./tmp
-
-# 3. 如果上述通配不适用于您的目录结构，可替换为按项目手动 COPY：
-#    COPY src/WebApi/WebApi.csproj          src/WebApi/
-#    COPY src/Application/Application.csproj src/Application/
-#    COPY src/Domain/Domain.csproj          src/Domain/
-
-RUN dotnet restore
-
-# 4. 复制所有源码并发布 Release 版本
 COPY . .
-RUN dotnet publish -c Release -o /app/publish --no-restore
+
+RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \\
+    dotnet restore "$PROJECT"
+
+RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \\
+    dotnet publish "$PROJECT" \\
+    -c Release \\
+    -o /app/publish \\
+    --no-restore
+
+RUN echo "$(basename "$PROJECT" .csproj).dll" > /app/publish/.entrypoint
 
 # 阶段 2: 生产运行环境
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runner
+ARG DOTNET_VERSION
+FROM mcr.microsoft.com/dotnet/aspnet:\${DOTNET_VERSION} AS runner
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends tzdata \\
     && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \\
     && rm -rf /var/lib/apt/lists/*
+
 ENV ASPNETCORE_URLS=http://+:8080 \\
     TZ=Asia/Shanghai
 
 COPY --from=builder /app/publish .
 
+RUN DLL=$(cat /app/.entrypoint) && \\
+    printf '#!/bin/sh\\nexec dotnet "%s"\\n' "$DLL" > /app/entrypoint.sh && \\
+    chmod +x /app/entrypoint.sh && \\
+    rm /app/.entrypoint
+
 EXPOSE 8080
 
-# 请将 App.dll 替换为您项目的实际主入口程序集名称
-ENTRYPOINT ["dotnet", "App.dll"]
+ENTRYPOINT ["/app/entrypoint.sh"]
 `
 
   readonly dockerignoreTemplate = `# 版本控制

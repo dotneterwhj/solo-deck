@@ -14,9 +14,13 @@ import {
   HardDrive,
   Boxes,
   FileCode,
+  Plus,
+  Trash2,
+  Eye,
+  EyeOff,
+  KeyRound,
   Sparkles,
   Copy,
-  FolderTree,
 } from 'lucide-react'
 import {
   RuntimeType,
@@ -26,12 +30,22 @@ import {
   ArtifactType,
   DockerDeliveryMode,
   DeployTargetMode,
+  DockerBuildArg,
+  EnvVariable,
+  PortMapping,
 } from '@/lib/types'
 import { DockerfileGuideModal } from '@/components/guides/dockerfile-guide-modal'
 import { DOCKERFILE_TEMPLATES, DockerfileTemplate } from '@/lib/dockerfile-templates'
-import { getAllRuntimes, getRuntime, IRuntimePlugin } from '@/lib/runtimes'
+import {
+  getAllRuntimes,
+  getRuntime,
+  IRuntimePlugin,
+  extractPortsFromCommand,
+  extractPortMappingsFromCommand,
+} from '@/lib/runtimes'
+import { validateProjectName } from '@/lib/validators'
 
-type Step = 'basic' | 'git' | 'runtime' | 'server' | 'confirm'
+type Step = 'basic' | 'git' | 'runtime' | 'env' | 'server' | 'confirm'
 
 interface WizardData {
   projectName: string
@@ -48,12 +62,16 @@ interface WizardData {
   selectedServerId: string
   serverName: string
   serverIp: string
-  serverPort: string
+  serverPort: number[]
+  containerPort: number[]
+  portMappings: PortMapping[]
   serverPath: string
   healthCheckUrl: string
   runnerMode: RunnerMode
   artifactType: ArtifactType
   dockerDeliveryMode: DockerDeliveryMode
+  dockerBuildArgs: DockerBuildArg[]
+  envVars: EnvVariable[]
 }
 
 interface NewProjectWizardProps {
@@ -70,22 +88,6 @@ function toSafeSlug(name: string): string {
   return slug || 'app'
 }
 
-function extractPortFromCommand(cmd: string): string | null {
-  const dockerMatch = cmd.match(/-p\s+["']?(?:(\d+):)?(\d+)["']?/)
-  if (dockerMatch) {
-    return dockerMatch[1] || dockerMatch[2]
-  }
-  const bindMatch = cmd.match(/-b\s+["']?(?:[0-9.]+)?:(\d+)["']?/)
-  if (bindMatch) {
-    return bindMatch[1]
-  }
-  const portFlagMatch = cmd.match(/(?:--port[=\s]+|-p\s+)(\d+)/)
-  if (portFlagMatch) {
-    return portFlagMatch[1]
-  }
-  return null
-}
-
 export function NewProjectWizard({
   onClose,
   onProjectCreated,
@@ -94,6 +96,8 @@ export function NewProjectWizard({
   const [servers, setServers] = useState<ServerNode[]>([])
   const [loading, setLoading] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
+  const [showSecrets, setShowSecrets] = useState<Record<number, boolean>>({})
+  const [portInput, setPortInput] = useState('3000')
 
   const [data, setData] = useState<WizardData>({
     projectName: '',
@@ -106,16 +110,23 @@ export function NewProjectWizard({
     deployTargetMode: 'docker',
     installCommand: 'npm install',
     buildCommand: 'docker build -t app:latest .',
-    startCommand: 'docker run -d -p 3000:3000 --name app app:latest',
+    startCommand: 'docker run -d -p 3000:3000 -e NODE_ENV="production" -e PORT="3000" --name app app:latest',
     selectedServerId: 'srv-001',
     serverName: '生产服务器 1',
     serverIp: '192.168.1.100',
-    serverPort: '3000',
+    serverPort: [3000],
+    containerPort: [3000],
+    portMappings: [{ host: 3000, container: 3000 }],
     serverPath: '/opt/apps/app',
     healthCheckUrl: '',
     runnerMode: 'simulation',
     artifactType: 'docker',
     dockerDeliveryMode: 'auto',
+    dockerBuildArgs: [],
+    envVars: [
+      { key: 'NODE_ENV', value: 'production' },
+      { key: 'PORT', value: '3000' },
+    ],
   })
 
   const [showDockerfileModal, setShowDockerfileModal] = useState(false)
@@ -129,10 +140,15 @@ export function NewProjectWizard({
   const handleDeployTargetModeChange = (mode: DeployTargetMode) => {
     const slug = toSafeSlug(data.projectName)
     const plugin = getRuntime(data.runtime) || getAllRuntimes()[0]
-    const port = Number(data.serverPort) || plugin.defaultPort
+    const mappings =
+      data.portMappings && data.portMappings.length > 0
+        ? data.portMappings
+        : data.serverPort.length > 0
+        ? data.serverPort.map((p) => ({ host: p, container: p }))
+        : [{ host: plugin.defaultPort, container: plugin.defaultPort }]
     const install = plugin.getInstallCommand(slug, { mode })
     const build = plugin.getBuildCommand(slug, { mode })
-    const start = plugin.getStartCommand(slug, port, { mode })
+    const start = plugin.getStartCommand(slug, mappings, { mode, envVars: data.envVars })
 
     setData((prev) => ({
       ...prev,
@@ -141,17 +157,9 @@ export function NewProjectWizard({
       installCommand: install,
       buildCommand: build,
       startCommand: start,
-    }))
-  }
-
-  const handleApplyDockerTemplate = (tmpl: DockerfileTemplate) => {
-    setSelectedDockerTemplate(tmpl)
-    const slug = toSafeSlug(data.projectName)
-    const port = tmpl.defaultPort
-    setData((prev) => ({
-      ...prev,
-      serverPort: port,
-      startCommand: `docker run -d -p ${port}:${port} --name ${slug} ${slug}:latest`,
+      portMappings: mappings,
+      serverPort: mappings.map((m) => m.host),
+      containerPort: mappings.map((m) => m.container),
     }))
   }
 
@@ -182,6 +190,7 @@ export function NewProjectWizard({
     { id: 'basic', title: '基本信息' },
     { id: 'git', title: 'Git 仓库' },
     { id: 'runtime', title: '运行时 & 构建' },
+    { id: 'env', title: '环境变量' },
     { id: 'server', title: '目标主机' },
     { id: 'confirm', title: '确认配置' },
   ]
@@ -190,6 +199,13 @@ export function NewProjectWizard({
 
   const handleNext = () => {
     setErrorMessage('')
+    if (step === 'basic') {
+      const check = validateProjectName(data.projectName)
+      if (!check.valid) {
+        setErrorMessage(check.error || '项目名称不符合规范')
+        return
+      }
+    }
     const nextStep = steps[stepIndex + 1]?.id
     if (nextStep) {
       setStep(nextStep)
@@ -213,21 +229,14 @@ export function NewProjectWizard({
       const newPath = shouldUpdatePath ? `/opt/apps/${slug}` : prev.serverPath
 
       const plugin = getRuntime(prev.runtime) || getAllRuntimes()[0]
-      const port = Number(prev.serverPort) || plugin.defaultPort
-
-      let newBuild = prev.buildCommand
-      let newStart = prev.startCommand
-      if (prev.deployTargetMode === 'docker') {
-        if (prev.buildCommand.includes('docker build')) {
-          newBuild = `docker build -t ${slug}:latest .`
-        }
-        if (prev.startCommand.includes('docker run')) {
-          newStart = `docker run -d -p ${port}:${port} --name ${slug} ${slug}:latest`
-        }
-      } else {
-        newBuild = plugin.getBuildCommand(slug, { mode: 'native' })
-        newStart = plugin.getStartCommand(slug, port, { mode: 'native' })
-      }
+      const mappings =
+        prev.portMappings && prev.portMappings.length > 0
+          ? prev.portMappings
+          : prev.serverPort.length > 0
+          ? prev.serverPort.map((p) => ({ host: p, container: p }))
+          : [{ host: plugin.defaultPort, container: plugin.defaultPort }]
+      const newBuild = plugin.getBuildCommand(slug, { mode: prev.deployTargetMode })
+      const newStart = plugin.getStartCommand(slug, mappings, { mode: prev.deployTargetMode, envVars: prev.envVars })
 
       return {
         ...prev,
@@ -245,42 +254,244 @@ export function NewProjectWizard({
     const mode = data.deployTargetMode || 'docker'
     const install = plugin.getInstallCommand(slug, { mode })
     const build = plugin.getBuildCommand(slug, { mode })
-    const start = plugin.getStartCommand(slug, port, { mode })
     const tmpl = plugin.toDockerfileTemplate()
 
+    // 根据运行时插件声明的 Docker 构建参数定义，初始化 dockerBuildArgs（预填默认值）
+    const buildArgs: DockerBuildArg[] = (plugin.dockerBuildArgs || []).map((def) => ({
+      key: def.key,
+      value: def.defaultValue || '',
+    }))
+
+    // 根据运行时插件声明的默认环境变量模板初始化
+    const presetEnvs: EnvVariable[] = (plugin.sampleEnvVars || []).map((preset) => ({
+      key: preset.key,
+      value: preset.key.toUpperCase() === 'PORT' ? String(port) : preset.value,
+      isSecret: false,
+    }))
+
+    const mappings: PortMapping[] = [{ host: port, container: port }]
+    const start = plugin.getStartCommand(slug, mappings, { mode, envVars: presetEnvs })
+
     setSelectedDockerTemplate(tmpl)
+    setPortInput(String(port))
     setData((prev) => ({
       ...prev,
       runtime: plugin.name,
       installCommand: install,
       buildCommand: build,
       startCommand: start,
-      serverPort: String(port),
+      serverPort: [port],
+      containerPort: [port],
+      portMappings: mappings,
       artifactType: mode === 'docker' ? 'docker' : 'tar',
+      dockerBuildArgs: buildArgs,
+      envVars: presetEnvs,
     }))
   }
 
   const handleStartCommandChange = (cmd: string) => {
-    const extractedPort = extractPortFromCommand(cmd)
+    const extractedMappings = extractPortMappingsFromCommand(cmd)
+    const extractedPorts = extractedMappings.length > 0 ? extractedMappings.map((m) => m.host) : extractPortsFromCommand(cmd)
+    const extractedCPorts = extractedMappings.length > 0 ? extractedMappings.map((m) => m.container) : extractedPorts
     setData((prev) => ({
       ...prev,
       startCommand: cmd,
-      ...(extractedPort ? { serverPort: extractedPort } : {}),
+      ...(extractedPorts.length > 0
+        ? {
+            serverPort: extractedPorts,
+            containerPort: extractedCPorts,
+            portMappings:
+              extractedMappings.length > 0
+                ? extractedMappings
+                : extractedPorts.map((p) => ({ host: p, container: p })),
+          }
+        : {}),
+    }))
+    if (extractedPorts.length > 0) {
+      setPortInput(extractedPorts.join(', '))
+    }
+  }
+
+  const handleServerPortChange = (ports: number[]) => {
+    setData((prev) => {
+      const primaryPort = ports[0] || 3000
+      const updatedEnvVars = prev.envVars.map((e) =>
+        e.key.toUpperCase() === 'PORT' ? { ...e, value: String(primaryPort) } : e
+      )
+      const slug = toSafeSlug(prev.projectName)
+      const plugin = getRuntime(prev.runtime) || getAllRuntimes()[0]
+      const mappings: PortMapping[] = ports.map((p, idx) => ({
+        host: p,
+        container: (prev.containerPort && prev.containerPort[idx]) || p,
+      }))
+      const updatedStart = plugin.getStartCommand(slug, mappings, {
+        mode: prev.deployTargetMode,
+        envVars: updatedEnvVars,
+      })
+      return {
+        ...prev,
+        serverPort: ports,
+        containerPort: mappings.map((m) => m.container),
+        portMappings: mappings,
+        startCommand: updatedStart,
+        envVars: updatedEnvVars,
+      }
+    })
+  }
+
+  const handlePortMappingUpdate = (
+    index: number,
+    field: 'host' | 'container',
+    value: number
+  ) => {
+    setData((prev) => {
+      const updated = prev.portMappings.map((m, i) =>
+        i === index ? { ...m, [field]: value } : m
+      )
+      const hostPorts = updated.map((m) => m.host).filter((p) => !isNaN(p) && p > 0)
+      const containerPorts = updated.map((m) => m.container).filter((p) => !isNaN(p) && p > 0)
+      const primaryContainerPort = containerPorts[0] || (currentPlugin.defaultPort || 3000)
+
+      const updatedEnvVars = prev.envVars.map((e) =>
+        e.key.toUpperCase() === 'PORT' ? { ...e, value: String(primaryContainerPort) } : e
+      )
+      const slug = toSafeSlug(prev.projectName)
+      const updatedStart = currentPlugin.getStartCommand(slug, updated, {
+        mode: prev.deployTargetMode,
+        envVars: updatedEnvVars,
+      })
+
+      return {
+        ...prev,
+        portMappings: updated,
+        serverPort: hostPorts.length > 0 ? hostPorts : [3000],
+        containerPort: containerPorts.length > 0 ? containerPorts : [3000],
+        startCommand: updatedStart,
+        envVars: updatedEnvVars,
+      }
+    })
+  }
+
+  const handleAddPortMapping = () => {
+    setData((prev) => {
+      const last = prev.portMappings[prev.portMappings.length - 1]
+      const nextHost = last ? last.host + 1 : 8080
+      const nextContainer = last ? last.container + 1 : currentPlugin.defaultPort
+      const updated: PortMapping[] = [
+        ...prev.portMappings,
+        { host: nextHost, container: nextContainer },
+      ]
+      const hostPorts = updated.map((m) => m.host)
+      const containerPorts = updated.map((m) => m.container)
+      const slug = toSafeSlug(prev.projectName)
+      const updatedStart = currentPlugin.getStartCommand(slug, updated, {
+        mode: prev.deployTargetMode,
+        envVars: prev.envVars,
+      })
+      return {
+        ...prev,
+        portMappings: updated,
+        serverPort: hostPorts,
+        containerPort: containerPorts,
+        startCommand: updatedStart,
+      }
+    })
+  }
+
+  const handleRemovePortMapping = (index: number) => {
+    setData((prev) => {
+      if (prev.portMappings.length <= 1) return prev
+      const updated = prev.portMappings.filter((_, i) => i !== index)
+      const hostPorts = updated.map((m) => m.host)
+      const containerPorts = updated.map((m) => m.container)
+      const primaryContainerPort = containerPorts[0] || currentPlugin.defaultPort
+
+      const updatedEnvVars = prev.envVars.map((e) =>
+        e.key.toUpperCase() === 'PORT' ? { ...e, value: String(primaryContainerPort) } : e
+      )
+      const slug = toSafeSlug(prev.projectName)
+      const updatedStart = currentPlugin.getStartCommand(slug, updated, {
+        mode: prev.deployTargetMode,
+        envVars: updatedEnvVars,
+      })
+      return {
+        ...prev,
+        portMappings: updated,
+        serverPort: hostPorts,
+        containerPort: containerPorts,
+        startCommand: updatedStart,
+        envVars: updatedEnvVars,
+      }
+    })
+  }
+
+  const handleAddEnvVar = () => {
+    setData((prev) => ({
+      ...prev,
+      envVars: [...prev.envVars, { key: '', value: '', isSecret: false }],
     }))
   }
 
-  const handleServerPortChange = (port: string) => {
+  const handleRemoveEnvVar = (index: number) => {
     setData((prev) => {
-      let updatedStart = prev.startCommand
-      if (prev.startCommand.includes('-p ')) {
-        updatedStart = prev.startCommand.replace(
-          /-p\s+["']?(\d+):(\d+)["']?/,
-          `-p ${port}:$2`
-        )
-      }
+      const updated = prev.envVars.filter((_, i) => i !== index)
+      const slug = toSafeSlug(prev.projectName)
+      const plugin = getRuntime(prev.runtime) || getAllRuntimes()[0]
+      const updatedStart = plugin.getStartCommand(slug, prev.serverPort, {
+        mode: prev.deployTargetMode,
+        envVars: updated,
+      })
       return {
         ...prev,
-        serverPort: port,
+        envVars: updated,
+        startCommand: updatedStart,
+      }
+    })
+  }
+
+  const handleUpdateEnvVar = (index: number, field: keyof EnvVariable, val: any) => {
+    setData((prev) => {
+      const updated = [...prev.envVars]
+      updated[index] = { ...updated[index], [field]: val }
+      const slug = toSafeSlug(prev.projectName)
+      const plugin = getRuntime(prev.runtime) || getAllRuntimes()[0]
+      const updatedStart = plugin.getStartCommand(slug, prev.serverPort, {
+        mode: prev.deployTargetMode,
+        envVars: updated,
+      })
+      return {
+        ...prev,
+        envVars: updated,
+        startCommand: updatedStart,
+      }
+    })
+  }
+
+  const handleImportPresetEnvVars = () => {
+    const plugin = getRuntime(data.runtime) || getAllRuntimes()[0]
+    const presets: EnvVariable[] = (plugin.sampleEnvVars || []).map((preset) => ({
+      key: preset.key,
+      value:
+        preset.key.toUpperCase() === 'PORT'
+          ? data.serverPort[0]
+            ? String(data.serverPort[0])
+            : String(plugin.defaultPort)
+          : preset.value,
+      isSecret: false,
+    }))
+    setData((prev) => {
+      const existingMap = new Map<string, EnvVariable>()
+      prev.envVars.forEach((e) => existingMap.set(e.key, e))
+      presets.forEach((p) => existingMap.set(p.key, p))
+      const merged = Array.from(existingMap.values())
+      const slug = toSafeSlug(prev.projectName)
+      const updatedStart = plugin.getStartCommand(slug, prev.serverPort, {
+        mode: prev.deployTargetMode,
+        envVars: merged,
+      })
+      return {
+        ...prev,
+        envVars: merged,
         startCommand: updatedStart,
       }
     })
@@ -301,15 +512,41 @@ export function NewProjectWizard({
   const isStepComplete = () => {
     switch (step) {
       case 'basic':
-        return data.projectName.trim().length > 0
+        return validateProjectName(data.projectName).valid
       case 'git':
         return data.gitUrl.trim().length > 0 && data.gitBranch.trim().length > 0
       case 'runtime':
-        return data.runtime !== ''
+        if (!data.runtime) return false
+        if (data.deployTargetMode === 'docker' && currentPlugin.dockerBuildArgs) {
+          const missingRequired = currentPlugin.dockerBuildArgs.some((def) => {
+            if (!def.required) return false
+            const arg = data.dockerBuildArgs.find((a) => a.key === def.key)
+            return !arg?.value || !arg.value.trim()
+          })
+          if (missingRequired) return false
+        }
+        return true
+      case 'env':
+        return true
       case 'server':
+        const validPorts =
+          data.deployTargetMode === 'docker'
+            ? data.portMappings.length > 0 &&
+              data.portMappings.every(
+                (m) =>
+                  !isNaN(m.host) &&
+                  m.host > 0 &&
+                  m.host <= 65535 &&
+                  !isNaN(m.container) &&
+                  m.container > 0 &&
+                  m.container <= 65535
+              )
+            : data.serverPort.length > 0 &&
+              data.serverPort.every((p) => !isNaN(p) && p > 0 && p <= 65535)
+
         return (
           data.serverIp.trim().length > 0 &&
-          data.serverPort.trim().length > 0 &&
+          validPorts &&
           data.serverPath.trim().length > 0
         )
       case 'confirm':
@@ -322,6 +559,12 @@ export function NewProjectWizard({
   const handleFinish = async () => {
     setLoading(true)
     setErrorMessage('')
+    const nameCheck = validateProjectName(data.projectName)
+    if (!nameCheck.valid) {
+      setErrorMessage(nameCheck.error || '项目名称不符合规范')
+      setLoading(false)
+      return
+    }
     try {
       const payload = {
         name: data.projectName,
@@ -334,7 +577,9 @@ export function NewProjectWizard({
         serverId: data.selectedServerId,
         serverIp: data.serverIp,
         serverName: data.serverName,
-        port: Number(data.serverPort) || 3000,
+        serverPort: data.serverPort,
+        containerPort: data.containerPort,
+        portMappings: data.portMappings,
         deployPath: data.serverPath,
         installCommand: data.installCommand,
         buildCommand: data.buildCommand,
@@ -343,7 +588,14 @@ export function NewProjectWizard({
         runnerMode: data.runnerMode,
         artifactType: data.artifactType,
         deployTargetMode: data.deployTargetMode,
-        dockerDeliveryMode: data.dockerDeliveryMode,
+        dockerBuildArgs: (currentPlugin.dockerBuildArgs || [])
+          .map((def) => {
+            const userArg = data.dockerBuildArgs.find((a) => a.key === def.key)
+            const val = userArg?.value !== undefined ? userArg.value : (def.defaultValue || '')
+            return { key: def.key, value: val.trim() }
+          })
+          .filter((arg) => arg.key && arg.value),
+        envVars: data.envVars.filter((e) => e.key && e.key.trim()),
       }
 
       const res = await fetch('/api/projects', {
@@ -428,15 +680,32 @@ export function NewProjectWizard({
           {step === 'basic' && (
             <div className="space-y-4">
               <div>
-                <label className="text-xs font-semibold text-muted-foreground">
-                  项目名称 <span className="text-destructive">*</span>
-                </label>
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-muted-foreground">
+                    项目名称 <span className="text-destructive">*</span>
+                  </label>
+                  <span className="text-[11px] text-muted-foreground">
+                    仅限小写字母、数字、"-" 及 "_"
+                  </span>
+                </div>
                 <Input
-                  placeholder="例如：核心业务网关、支付处理中心"
+                  placeholder="例如：core-gateway、order_service_01"
                   value={data.projectName}
                   onChange={(e) => handleProjectNameChange(e.target.value)}
-                  className="mt-1"
+                  className={`mt-1 font-mono text-sm ${data.projectName && !validateProjectName(data.projectName).valid
+                    ? 'border-destructive focus-visible:ring-destructive'
+                    : ''
+                    }`}
                 />
+                {data.projectName && !validateProjectName(data.projectName).valid ? (
+                  <p className="text-[11px] text-destructive mt-1 flex items-center gap-1">
+                    <span>{validateProjectName(data.projectName).error}</span>
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground/70 mt-1">
+                    格式规范：只能包含小写英文字母、数字、"-" 及 "_"，且不能以数字开头和不能包含空格。
+                  </p>
+                )}
               </div>
 
               <div>
@@ -664,6 +933,89 @@ export function NewProjectWizard({
                     className="mt-1 font-mono text-xs"
                   />
                 </div>
+
+                {/* Docker 构建参数 (ARG) 配置 —— 仅在 Docker 模式且当前运行时声明了 dockerBuildArgs 时显示 */}
+                {data.deployTargetMode === 'docker' && currentPlugin.dockerBuildArgs && currentPlugin.dockerBuildArgs.length > 0 && (
+                  <div className="rounded-lg border border-violet-500/30 bg-violet-500/5 p-3 space-y-2.5">
+                    <div className="flex items-center gap-2">
+                      <div className="size-5 rounded bg-violet-500/20 text-violet-400 flex items-center justify-center">
+                        <FileCode className="size-3" />
+                      </div>
+                      <span className="text-xs font-bold text-foreground">
+                        Docker 构建参数 (Build Args)
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400 font-medium">
+                        对应 Dockerfile ARG 指令
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground leading-snug">
+                      以下参数将在 <code className="text-violet-400">docker build</code> 时通过{' '}
+                      <code className="text-violet-400">--build-arg</code> 注入。
+                    </p>
+                    <div className="space-y-2">
+                      {currentPlugin.dockerBuildArgs.map((argDef) => {
+                        const currentArg = data.dockerBuildArgs.find((a) => a.key === argDef.key)
+                        const val = currentArg?.value !== undefined ? currentArg.value : (argDef.defaultValue || '')
+                        return (
+                          <div key={argDef.key}>
+                            <label className="text-[11px] font-semibold text-muted-foreground flex items-center gap-1.5">
+                              <code className="text-violet-400 font-mono">{argDef.key}</code>
+                              {argDef.required && <span className="text-destructive">*</span>}
+                              <span className="font-normal text-muted-foreground/70">— {argDef.description}</span>
+                            </label>
+                            <Input
+                              value={val}
+                              onChange={(e) => {
+                                const newArgs = (currentPlugin.dockerBuildArgs || []).map((def) => {
+                                  if (def.key === argDef.key) {
+                                    return { key: def.key, value: e.target.value }
+                                  }
+                                  const existing = data.dockerBuildArgs.find((a) => a.key === def.key)
+                                  return { key: def.key, value: existing?.value !== undefined ? existing.value : (def.defaultValue || '') }
+                                })
+                                setData({ ...data, dockerBuildArgs: newArgs })
+                              }}
+                              className="mt-1 font-mono text-xs"
+                              placeholder={argDef.placeholder || argDef.defaultValue || ''}
+                            />
+                          </div>
+                        )
+                      })}
+                    </div>
+
+                    {/* 实时构建命令预览 */}
+                    <div className="pt-2 border-t border-violet-500/20">
+                      <span className="text-[10px] text-muted-foreground block mb-1">
+                        预计 Docker 构建命令预览 (流水线自动注入 --build-arg):
+                      </span>
+                      <div className="p-2 rounded bg-black/40 border border-violet-500/20 font-mono text-[11px] text-violet-300 break-all select-all">
+                        <span className="text-muted-foreground select-none">$ </span>
+                        docker build {(() => {
+                          const args = (currentPlugin.dockerBuildArgs || []).map((def) => {
+                            const userArg = data.dockerBuildArgs.find((a) => a.key === def.key)
+                            const val = userArg?.value !== undefined ? userArg.value : (def.defaultValue || '')
+                            return { key: def.key, value: val }
+                          }).filter((a) => a.key && a.value)
+                          return args.length > 0 ? args.map((a) => `--build-arg ${a.key}="${a.value}"`).join(' ') + ' ' : ''
+                        })()}-t {toSafeSlug(data.projectName)}:latest .
+                      </div>
+                    </div>
+
+                    {/* 必填项提示 */}
+                    {currentPlugin.dockerBuildArgs.some((d) => {
+                      if (!d.required) return false
+                      const userArg = data.dockerBuildArgs.find((a) => a.key === d.key)
+                      const val = userArg?.value !== undefined ? userArg.value : (d.defaultValue || '')
+                      return !val.trim()
+                    }) && (
+                        <p className="text-[11px] text-amber-500 flex items-center gap-1 mt-1">
+                          <ShieldAlert className="size-3.5 shrink-0" />
+                          <span>带 <strong className="text-destructive">*</strong> 为必填构建参数，填写完整后方可进入下一步</span>
+                        </p>
+                      )}
+                  </div>
+                )}
+
                 <div>
                   <label className="text-xs font-semibold text-muted-foreground">
                     启动/重载命令
@@ -750,14 +1102,6 @@ export function NewProjectWizard({
                           {selectedDockerTemplate.name}
                         </span>
                         <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handleApplyDockerTemplate(selectedDockerTemplate)}
-                            className="text-[11px] text-primary hover:underline font-medium"
-                          >
-                            同步该端口 ({selectedDockerTemplate.defaultPort})
-                          </button>
-                          <span className="text-muted-foreground">•</span>
                           <button
                             type="button"
                             onClick={() => handleCopyDockerCode(selectedDockerTemplate.dockerfile)}
@@ -906,7 +1250,173 @@ export function NewProjectWizard({
             </div>
           )}
 
-          {/* Step 4: Server target */}
+          {/* Step 4: Environment Variables */}
+          {step === 'env' && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-foreground flex items-center gap-1.5">
+                    <KeyRound className="size-4 text-primary" />
+                    环境变量配置 (Environment Variables)
+                  </h3>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    根据部署载体模式自动将环境变量注入容器或原生宿主机系统
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="xs"
+                    onClick={handleImportPresetEnvVars}
+                    className="text-xs"
+                  >
+                    导入技术栈预设
+                  </Button>
+                  <Button
+                    type="button"
+                    size="xs"
+                    onClick={handleAddEnvVar}
+                    className="text-xs"
+                  >
+                    <Plus className="size-3.5 mr-1" />
+                    添加变量
+                  </Button>
+                </div>
+              </div>
+
+              {/* 载体模式行为指引与实时命令预览 */}
+              {data.deployTargetMode === 'docker' ? (
+                <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 p-3 space-y-2.5">
+                  <div className="flex items-center gap-2">
+                    <div className="size-6 rounded bg-blue-500/20 text-blue-400 flex items-center justify-center">
+                      <Boxes className="size-3.5" />
+                    </div>
+                    <div>
+                      <span className="text-xs font-bold text-foreground">
+                        Docker 容器环境变量规范
+                      </span>
+                      <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 font-medium">
+                        -e KEY="VALUE" 参数注入
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground pl-8">
+                    在 Docker 容器化模式下，配置的环境变量将在拉起容器时自动格式化为 <code className="text-blue-400 font-mono">-e KEY="VALUE"</code> 并注入到 <code className="font-mono text-foreground">docker run</code> 命令中。
+                  </p>
+                  <div className="pt-1.5 border-t border-blue-500/20">
+                    <span className="text-[10px] text-muted-foreground block mb-1">
+                      启动命令环境变量注入预览:
+                    </span>
+                    <div className="p-2 rounded bg-black/40 border border-blue-500/20 font-mono text-[11px] text-blue-300 break-all select-all">
+                      <span className="text-muted-foreground select-none">$ </span>
+                      {data.startCommand}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 space-y-2.5">
+                  <div className="flex items-center gap-2">
+                    <div className="size-6 rounded bg-amber-500/20 text-amber-400 flex items-center justify-center">
+                      <Terminal className="size-3.5" />
+                    </div>
+                    <div>
+                      <span className="text-xs font-bold text-foreground">
+                        原生宿主机系统环境变量规范
+                      </span>
+                      <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-medium">
+                        export 与 .env 文件写入
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground pl-8">
+                    在原生宿主机模式下，流水线在目标服务器执行应用时，将通过系统级 <code className="text-amber-400 font-mono">export KEY="VALUE"</code> 注入会话环境，并在目标目录 <code className="text-amber-400 font-mono">{data.serverPath || '/path'}/.env</code> 自动写入环境变量文件。
+                  </p>
+                  <div className="pt-1.5 border-t border-amber-500/20">
+                    <span className="text-[10px] text-muted-foreground block mb-1">
+                      启动环境注入预览:
+                    </span>
+                    <div className="p-2 rounded bg-black/40 border border-amber-500/20 font-mono text-[11px] text-amber-300 break-all select-all">
+                      <span className="text-muted-foreground select-none">$ </span>
+                      {(() => {
+                        const validEnvs = data.envVars.filter((e) => e.key && e.key.trim())
+                        const prefix = validEnvs.length > 0 ? validEnvs.map((e) => `export ${e.key}="${e.value}"`).join(' && ') + ' && ' : ''
+                        return prefix + data.startCommand
+                      })()}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 变量列表 */}
+              <div className="space-y-2.5">
+                {data.envVars.length === 0 ? (
+                  <div className="p-8 text-center border border-dashed border-border rounded-lg text-muted-foreground text-xs space-y-2">
+                    <p>暂未配置环境变量</p>
+                    <p className="text-[11px] text-muted-foreground/70">
+                      可点击上方【导入技术栈预设】快速填充默认环境变量，或点击【添加变量】手动新增
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+                    {data.envVars.map((env, idx) => (
+                      <div key={idx} className="flex items-center gap-2 bg-muted/20 p-2 rounded-lg border border-border/60">
+                        <Input
+                          placeholder="变量名 (如 PORT, NODE_ENV)"
+                          value={env.key}
+                          onChange={(e) => handleUpdateEnvVar(idx, 'key', e.target.value)}
+                          className="w-1/3 font-mono text-xs"
+                        />
+                        <div className="relative flex-1">
+                          <Input
+                            type={env.isSecret && !showSecrets[idx] ? 'password' : 'text'}
+                            placeholder="变量值"
+                            value={env.value}
+                            onChange={(e) => handleUpdateEnvVar(idx, 'value', e.target.value)}
+                            className="font-mono text-xs pr-8"
+                          />
+                          {env.isSecret && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setShowSecrets((prev) => ({ ...prev, [idx]: !prev[idx] }))
+                              }
+                              className="absolute right-2 top-2 text-muted-foreground hover:text-foreground"
+                            >
+                              {showSecrets[idx] ? (
+                                <EyeOff className="size-3.5" />
+                              ) : (
+                                <Eye className="size-3.5" />
+                              )}
+                            </button>
+                          )}
+                        </div>
+                        <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none px-2">
+                          <input
+                            type="checkbox"
+                            checked={env.isSecret || false}
+                            onChange={(e) => handleUpdateEnvVar(idx, 'isSecret', e.target.checked)}
+                            className="rounded border-border size-3.5"
+                          />
+                          <span>保密</span>
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveEnvVar(idx)}
+                          className="p-1.5 text-muted-foreground hover:text-destructive rounded transition-colors"
+                          title="删除变量"
+                        >
+                          <Trash2 className="size-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Step 5: Server target */}
           {step === 'server' && (
             <div className="space-y-4">
               {servers.length > 0 && (
@@ -928,7 +1438,7 @@ export function NewProjectWizard({
                 </div>
               )}
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-semibold text-muted-foreground">
                     服务器 IP <span className="text-destructive">*</span>
@@ -941,17 +1451,148 @@ export function NewProjectWizard({
                     className="mt-1 font-mono text-sm"
                   />
                 </div>
-                <div>
-                  <label className="text-xs font-semibold text-muted-foreground">
-                    监听端口 <span className="text-destructive">*</span>
-                  </label>
-                  <Input
-                    value={data.serverPort}
-                    onChange={(e) => handleServerPortChange(e.target.value)}
-                    className="mt-1 font-mono text-sm"
-                  />
-                </div>
+                {data.deployTargetMode === 'native' && (
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-semibold text-muted-foreground">
+                        宿主机监听端口 <span className="text-destructive">*</span>
+                      </label>
+                      <span className="text-[10px] text-muted-foreground">多端口用逗号分隔</span>
+                    </div>
+                    <Input
+                      value={portInput}
+                      onChange={(e) => {
+                        const val = e.target.value
+                        setPortInput(val)
+                        const parsed = val
+                          .split(/[,，\s]+/)
+                          .map((p) => parseInt(p.trim(), 10))
+                          .filter((p) => !isNaN(p) && p > 0 && p <= 65535)
+                        if (parsed.length > 0) {
+                          handleServerPortChange(parsed)
+                        }
+                      }}
+                      placeholder="例如: 3000, 8080"
+                      className="mt-1 font-mono text-sm"
+                    />
+                    {data.serverPort && data.serverPort.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                        {data.serverPort.map((p, idx) => (
+                          <span
+                            key={p}
+                            className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${
+                              idx === 0
+                                ? 'bg-primary/10 text-primary border-primary/20 font-medium'
+                                : 'bg-muted text-foreground border-border'
+                            }`}
+                          >
+                            :{p} {idx === 0 && <span className="text-[10px] text-primary/70">(主端口)</span>}
+                            {data.serverPort.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const updated = data.serverPort.filter((_, i) => i !== idx)
+                                  if (updated.length > 0) {
+                                    setPortInput(updated.join(', '))
+                                    handleServerPortChange(updated)
+                                  }
+                                }}
+                                className="hover:text-destructive text-muted-foreground ml-0.5"
+                              >
+                                ×
+                              </button>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
+
+              {data.deployTargetMode === 'docker' && (
+                <div className="space-y-2 rounded-lg border border-border/80 bg-muted/20 p-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <label className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                        <Boxes className="size-3.5 text-primary" />
+                        Docker 端口映射 (宿主机端口 ➔ 容器内部端口) <span className="text-destructive">*</span>
+                      </label>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
+                        宿主机端口为外部访问端口；容器端口为容器内部程序监听端口，两者可独立自定义。
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleAddPortMapping}
+                      className="h-7 text-xs text-primary gap-1 border-primary/30 hover:bg-primary/10"
+                    >
+                      <Plus className="size-3.5" /> 添加映射
+                    </Button>
+                  </div>
+
+                  <div className="space-y-2 pt-1">
+                    {data.portMappings.map((m, idx) => (
+                      <div key={idx} className="flex items-center gap-2 p-2 rounded-md border bg-background">
+                        <div className="flex-1">
+                          <span className="text-[10px] text-muted-foreground">宿主机外部端口 (Host)</span>
+                          <Input
+                            type="number"
+                            min={1}
+                            max={65535}
+                            value={m.host || ''}
+                            onChange={(e) => handlePortMappingUpdate(idx, 'host', parseInt(e.target.value, 10))}
+                            placeholder="如 8080"
+                            className="mt-0.5 font-mono text-xs h-8"
+                          />
+                        </div>
+                        <div className="text-muted-foreground pt-4 text-xs font-bold shrink-0">➔</div>
+                        <div className="flex-1">
+                          <span className="text-[10px] text-muted-foreground">容器内部端口 (Container)</span>
+                          <Input
+                            type="number"
+                            min={1}
+                            max={65535}
+                            value={m.container || ''}
+                            onChange={(e) => handlePortMappingUpdate(idx, 'container', parseInt(e.target.value, 10))}
+                            placeholder={`如 ${currentPlugin.defaultPort}`}
+                            className="mt-0.5 font-mono text-xs h-8"
+                          />
+                        </div>
+                        {data.portMappings.length > 1 && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleRemovePortMapping(idx)}
+                            className="mt-4 size-8 text-muted-foreground hover:text-destructive shrink-0"
+                            title="删除此映射"
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    {data.portMappings.map((m, idx) => (
+                      <span
+                        key={idx}
+                        className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${
+                          idx === 0
+                            ? 'bg-primary/10 text-primary border-primary/20 font-medium'
+                            : 'bg-muted text-foreground border-border'
+                        }`}
+                      >
+                        -p {m.host}:{m.container} {idx === 0 && <span className="text-[10px] text-primary/70">(主映射)</span>}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="text-xs font-semibold text-muted-foreground">
@@ -977,7 +1618,7 @@ export function NewProjectWizard({
                     setData({ ...data, healthCheckUrl: e.target.value })
                   }
                   className="mt-1 font-mono text-sm"
-                  placeholder={`http://${data.serverIp || '127.0.0.1'}:${data.serverPort || '3000'}/health`}
+                  placeholder={`http://${data.serverIp || '127.0.0.1'}:${data.serverPort[0] || 3000}/health`}
                 />
               </div>
             </div>
@@ -1009,18 +1650,89 @@ export function NewProjectWizard({
                   <span className="text-xs text-muted-foreground block">运行时环境</span>
                   <p className="text-sm font-semibold text-foreground mt-0.5">{data.runtime}</p>
                   <span className="text-[11px] text-muted-foreground font-mono block mt-1">
-                    构建: {data.buildCommand}
+                    模式: {data.deployTargetMode === 'docker' ? 'Docker 容器' : '原生宿主机进程'}
                   </span>
+                  {data.dockerBuildArgs.filter((a) => a.key && a.value).length > 0 && (
+                    <span className="text-[11px] text-muted-foreground font-mono block mt-0.5">
+                      ARG: {data.dockerBuildArgs.filter((a) => a.key && a.value).map((a) => `${a.key}=${a.value}`).join(', ')}
+                    </span>
+                  )}
                 </div>
 
                 <div className="p-3.5 rounded-lg bg-muted/40 border border-border/80">
-                  <span className="text-xs text-muted-foreground block">目标主机</span>
+                  <span className="text-xs text-muted-foreground block">
+                    {data.deployTargetMode === 'docker' ? '目标主机与端口映射' : '目标主机与端口'}
+                  </span>
                   <p className="text-sm font-mono font-semibold text-foreground mt-0.5">
-                    {data.serverIp}:{data.serverPort}
+                    {data.serverIp}{' '}
+                    {data.deployTargetMode === 'docker' && data.portMappings && data.portMappings.length > 0
+                      ? `(${data.portMappings.map((m) => `:${m.host}➔:${m.container}`).join(' ')})`
+                      : `(:${data.serverPort.join(', :')})`}
                   </p>
                   <span className="text-[11px] text-muted-foreground font-mono block mt-1">
                     路径: {data.serverPath}
                   </span>
+                </div>
+              </div>
+
+              {/* 构建与启动命令最终预览 */}
+              <div className="p-3.5 rounded-lg bg-muted/40 border border-border/80 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Terminal className="size-4 text-primary" />
+                    <span className="text-xs font-semibold text-foreground">
+                      构建与启动指令预览 (Command Preview)
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground">
+                    实际流水线调度将直接执行以下指令
+                  </span>
+                </div>
+
+                {/* Build Command */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-muted-foreground flex items-center gap-1.5 font-medium">
+                      <span className="size-1.5 rounded-full bg-blue-400" />
+                      编译构建命令 (Build Command)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard?.writeText(data.buildCommand)}
+                      className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-[10px]"
+                      title="复制命令"
+                    >
+                      <Copy className="size-3" />
+                      复制
+                    </button>
+                  </div>
+                  <div className="p-2.5 rounded bg-black/50 border border-border/60 font-mono text-xs text-emerald-400 break-all select-all leading-relaxed">
+                    <span className="text-muted-foreground select-none">$ </span>
+                    {data.buildCommand}
+                  </div>
+                </div>
+
+                {/* Start Command */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-muted-foreground flex items-center gap-1.5 font-medium">
+                      <span className="size-1.5 rounded-full bg-emerald-400" />
+                      服务启动 / 进程拉起命令 (Start Command)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard?.writeText(data.startCommand)}
+                      className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-[10px]"
+                      title="复制命令"
+                    >
+                      <Copy className="size-3" />
+                      复制
+                    </button>
+                  </div>
+                  <div className="p-2.5 rounded bg-black/50 border border-border/60 font-mono text-xs text-amber-300 break-all select-all leading-relaxed">
+                    <span className="text-muted-foreground select-none">$ </span>
+                    {data.startCommand}
+                  </div>
                 </div>
               </div>
 
@@ -1053,6 +1765,44 @@ export function NewProjectWizard({
                     </>
                   )}
                 </div>
+              </div>
+
+              <div className="p-3.5 rounded-lg bg-muted/40 border border-border/80">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground block">环境变量配置</span>
+                  <span className="text-[11px] font-mono text-muted-foreground">
+                    {data.envVars.filter((e) => e.key.trim()).length} 个变量
+                  </span>
+                </div>
+                <div className="mt-1 flex items-center gap-2">
+                  {data.deployTargetMode === 'docker' ? (
+                    <span className="text-xs text-blue-400 font-mono">
+                      Docker 部署：自动注入 <code className="bg-blue-500/10 px-1 py-0.5 rounded text-blue-300">-e KEY="VALUE"</code> 参数
+                    </span>
+                  ) : (
+                    <span className="text-xs text-amber-400 font-mono">
+                      原生部署：自动注入系统 <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300">export</code> 与 <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300">.env</code> 文件
+                    </span>
+                  )}
+                </div>
+                {data.envVars.filter((e) => e.key.trim()).length > 0 ? (
+                  <div className="flex flex-wrap gap-1.5 mt-2">
+                    {data.envVars.filter((e) => e.key.trim()).map((e, idx) => (
+                      <span
+                        key={idx}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-background/80 border border-border/80 text-[11px] font-mono text-foreground"
+                      >
+                        <span>{e.key}</span>
+                        <span className="text-muted-foreground">=</span>
+                        <span className="text-muted-foreground">
+                          {e.isSecret ? '******' : (e.value || '""')}
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground/70 mt-1">未配置环境变量</p>
+                )}
               </div>
 
               {data.deployTargetMode === 'native' ? (
@@ -1139,7 +1889,6 @@ export function NewProjectWizard({
           isOpen={showDockerfileModal}
           onClose={() => setShowDockerfileModal(false)}
           initialTemplateId={selectedDockerTemplate.id}
-          onApplyTemplate={handleApplyDockerTemplate}
         />
       )}
     </div>

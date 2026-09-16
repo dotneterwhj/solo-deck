@@ -1,8 +1,18 @@
 import { BaseRuntimePlugin, toSafeSlug } from '../base'
-import { RuntimeEnvVarPreset, DeployTargetMode } from '../types'
+import { RuntimeEnvVarPreset, DeployTargetMode, PortMapping } from '../types'
 
 export class NodeJSRuntimePlugin extends BaseRuntimePlugin {
-  override getStartCommand(projectName?: string, port?: number, options?: { mode?: DeployTargetMode; versionTag?: string }): string {
+  override getStartCommand(
+    projectName?: string,
+    port?: number | number[] | PortMapping[],
+    options?: {
+      mode?: DeployTargetMode
+      versionTag?: string
+      envVars?: { key: string; value: string }[]
+      containerPort?: number | number[]
+      portMappings?: PortMapping[]
+    }
+  ): string {
     const mode = options?.mode || 'docker'
     if (mode === 'native') {
       const slug = toSafeSlug(projectName)

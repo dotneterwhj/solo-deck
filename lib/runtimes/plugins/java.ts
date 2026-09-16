@@ -1,10 +1,20 @@
 import { BaseRuntimePlugin } from '../base'
-import { RuntimeEnvVarPreset } from '../types'
+import { RuntimeEnvVarPreset, DeployTargetMode, PortMapping } from '../types'
 
 export class JavaRuntimePlugin extends BaseRuntimePlugin {
-  override getStartCommand(projectName?: string, port?: number, options?: { mode?: 'docker' | 'native'; versionTag?: string }): string {
+  override getStartCommand(
+    projectName?: string,
+    port?: number | number[] | PortMapping[],
+    options?: {
+      mode?: DeployTargetMode
+      versionTag?: string
+      envVars?: { key: string; value: string }[]
+      containerPort?: number | number[]
+      portMappings?: PortMapping[]
+    }
+  ): string {
     if (options?.mode === 'native') {
-      const p = port || this.defaultPort
+      const p = this.extractNativePort(port)
       return `java -Dserver.port=${p} -jar target/*.jar || java -Dserver.port=${p} -jar target/app.jar || java -Dserver.port=${p} -jar app.jar`
     }
     return super.getStartCommand(projectName, port, options)

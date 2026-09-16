@@ -25,12 +25,14 @@ import {
   Boxes,
   Tag,
   Sparkles,
+  FileCode,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Project, Deployment, EnvVariable, ArtifactType, DockerDeliveryMode, DeployTargetMode } from '@/lib/types'
+import { Project, Deployment, EnvVariable, ArtifactType, DockerDeliveryMode, DeployTargetMode, DockerBuildArg, PortMapping } from '@/lib/types'
 import { DockerfileGuideModal } from '@/components/guides/dockerfile-guide-modal'
 import { getRuntime, getAllRuntimes, toSafeSlug } from '@/lib/runtimes'
+import { validateProjectName } from '@/lib/validators'
 
 interface ProjectDetailModalProps {
   project: Project
@@ -68,7 +70,14 @@ export function ProjectDetailModal({
     startCommand: project.startCommand,
     deployPath: project.deployPath,
     serverIp: project.serverIp,
-    port: project.port,
+    serverPort: project.serverPort && project.serverPort.length > 0 ? project.serverPort : [3000],
+    containerPort: project.containerPort && project.containerPort.length > 0 ? project.containerPort : (project.serverPort && project.serverPort.length > 0 ? project.serverPort : [3000]),
+    portMappings: project.portMappings && project.portMappings.length > 0
+      ? project.portMappings
+      : (project.serverPort && project.serverPort.length > 0 ? project.serverPort : [3000]).map((h, i) => ({
+          host: h,
+          container: (project.containerPort && project.containerPort[i]) || h,
+        })),
     healthCheckUrl: project.healthCheckUrl || '',
     runnerMode: project.runnerMode,
     deployTargetMode: (project.deployTargetMode || 'docker') as DeployTargetMode,
@@ -76,8 +85,29 @@ export function ProjectDetailModal({
     dockerDeliveryMode: (project.dockerDeliveryMode || 'auto') as DockerDeliveryMode,
     dockerRegistry: project.dockerRegistry || { registryUrl: '', namespace: '' },
   })
+  const [portInput, setPortInput] = useState(
+    (project.serverPort && project.serverPort.length > 0 ? project.serverPort : [3000]).join(', ')
+  )
   const [saving, setSaving] = useState(false)
   const [saveSuccess, setSaveSuccess] = useState(false)
+  const [saveError, setSaveError] = useState('')
+
+  useEffect(() => {
+    if (project) {
+      const p = project.serverPort && project.serverPort.length > 0 ? project.serverPort : [3000]
+      setPortInput(p.join(', '))
+      const c = project.containerPort && project.containerPort.length > 0 ? project.containerPort : [...p]
+      const mappings: PortMapping[] = project.portMappings && project.portMappings.length > 0
+        ? project.portMappings
+        : p.map((h, i) => ({ host: h, container: c[i] || h }))
+      setFormData((prev) => ({
+        ...prev,
+        serverPort: p,
+        containerPort: c,
+        portMappings: mappings,
+      }))
+    }
+  }, [project])
 
   const currentPlugin = useMemo(() => {
     return getRuntime(project.runtime) || getAllRuntimes()[0]
@@ -86,7 +116,9 @@ export function ProjectDetailModal({
   const handleDeployTargetModeChange = (mode: DeployTargetMode) => {
     const isDocker = mode === 'docker'
     const slug = toSafeSlug(formData.name)
-    const port = Number(formData.port) || currentPlugin.defaultPort
+    const mappings = formData.portMappings && formData.portMappings.length > 0
+      ? formData.portMappings
+      : [{ host: currentPlugin.defaultPort, container: currentPlugin.defaultPort }]
     let newBuild = formData.buildCommand
     let newStart = formData.startCommand
 
@@ -95,14 +127,14 @@ export function ProjectDetailModal({
         newBuild = currentPlugin.getBuildCommand(slug, { mode: 'docker' })
       }
       if (!newStart || !newStart.includes('docker run')) {
-        newStart = currentPlugin.getStartCommand(slug, port, { mode: 'docker' })
+        newStart = currentPlugin.getStartCommand(slug, mappings, { mode: 'docker', envVars })
       }
     } else {
       if (!newBuild || newBuild.includes('docker build')) {
         newBuild = currentPlugin.getBuildCommand(slug, { mode: 'native' })
       }
       if (!newStart || newStart.includes('docker run')) {
-        newStart = currentPlugin.getStartCommand(slug, port, { mode: 'native' })
+        newStart = currentPlugin.getStartCommand(slug, mappings.map((m) => m.host), { mode: 'native', envVars })
       }
     }
 
@@ -118,6 +150,115 @@ export function ProjectDetailModal({
   // Env vars
   const [envVars, setEnvVars] = useState<EnvVariable[]>(project.envVars || [])
   const [showSecrets, setShowSecrets] = useState<Record<number, boolean>>({})
+
+  // 同步环境变量变动至 startCommand (Docker 模式下重新生成 -e 参数)
+  const syncEnvVarsWithStartCommand = (updatedEnv: EnvVariable[]) => {
+    setFormData((prev) => {
+      if (prev.deployTargetMode === 'docker') {
+        const slug = toSafeSlug(prev.name || project.name)
+        const mappings = prev.portMappings && prev.portMappings.length > 0
+          ? prev.portMappings
+          : [{ host: currentPlugin.defaultPort, container: currentPlugin.defaultPort }]
+        const updatedStart = currentPlugin.getStartCommand(slug, mappings, {
+          mode: 'docker',
+          envVars: updatedEnv,
+        })
+        return {
+          ...prev,
+          startCommand: updatedStart,
+        }
+      }
+      return prev
+    })
+  }
+
+  const handlePortMappingUpdate = (
+    index: number,
+    field: 'host' | 'container',
+    value: number
+  ) => {
+    setFormData((prev) => {
+      const current = prev.portMappings || [{ host: 3000, container: 3000 }]
+      const updated = current.map((m, i) =>
+        i === index ? { ...m, [field]: value } : m
+      )
+      const hostPorts = updated.map((m) => m.host).filter((p) => !isNaN(p) && p > 0)
+      const containerPorts = updated.map((m) => m.container).filter((p) => !isNaN(p) && p > 0)
+      const slug = toSafeSlug(prev.name || project.name)
+      const newStart = currentPlugin.getStartCommand(slug, updated, {
+        mode: prev.deployTargetMode,
+        envVars,
+      })
+
+      return {
+        ...prev,
+        portMappings: updated,
+        serverPort: hostPorts.length > 0 ? hostPorts : [3000],
+        containerPort: containerPorts.length > 0 ? containerPorts : [3000],
+        startCommand: newStart,
+      }
+    })
+  }
+
+  const handleAddPortMapping = () => {
+    setFormData((prev) => {
+      const current = prev.portMappings || [{ host: 3000, container: 3000 }]
+      const last = current[current.length - 1]
+      const nextHost = last ? last.host + 1 : 8080
+      const nextContainer = last ? last.container + 1 : currentPlugin.defaultPort
+      const updated: PortMapping[] = [
+        ...current,
+        { host: nextHost, container: nextContainer },
+      ]
+      const hostPorts = updated.map((m) => m.host)
+      const containerPorts = updated.map((m) => m.container)
+      const slug = toSafeSlug(prev.name || project.name)
+      const newStart = currentPlugin.getStartCommand(slug, updated, {
+        mode: prev.deployTargetMode,
+        envVars,
+      })
+      return {
+        ...prev,
+        portMappings: updated,
+        serverPort: hostPorts,
+        containerPort: containerPorts,
+        startCommand: newStart,
+      }
+    })
+  }
+
+  const handleRemovePortMapping = (index: number) => {
+    setFormData((prev) => {
+      const current = prev.portMappings || [{ host: 3000, container: 3000 }]
+      if (current.length <= 1) return prev
+      const updated = current.filter((_, i) => i !== index)
+      const hostPorts = updated.map((m) => m.host)
+      const containerPorts = updated.map((m) => m.container)
+      const slug = toSafeSlug(prev.name || project.name)
+      const newStart = currentPlugin.getStartCommand(slug, updated, {
+        mode: prev.deployTargetMode,
+        envVars,
+      })
+      return {
+        ...prev,
+        portMappings: updated,
+        serverPort: hostPorts,
+        containerPort: containerPorts,
+        startCommand: newStart,
+      }
+    })
+  }
+
+  // Docker build args
+  const [dockerBuildArgs, setDockerBuildArgs] = useState<DockerBuildArg[]>(() => {
+    return (currentPlugin.dockerBuildArgs || []).map((def) => {
+      const existing = project.dockerBuildArgs?.find((a) => a.key === def.key)
+      return {
+        key: def.key,
+        value: existing?.value !== undefined ? existing.value : (def.defaultValue || ''),
+      }
+    })
+  })
 
   // Fetch deployments for this project
   const loadDeployments = async () => {
@@ -140,6 +281,13 @@ export function ProjectDetailModal({
   }, [project.id])
 
   const handleSaveConfig = async () => {
+    setSaveError('')
+    const nameCheck = validateProjectName(formData.name)
+    if (!nameCheck.valid) {
+      setSaveError(nameCheck.error || '项目名称不符合规范')
+      return
+    }
+
     setSaving(true)
     try {
       const res = await fetch(`/api/projects/${project.id}`, {
@@ -147,16 +295,28 @@ export function ProjectDetailModal({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...formData,
+          name: formData.name.trim(),
           envVars,
+          dockerBuildArgs: (currentPlugin.dockerBuildArgs || [])
+            .map((def) => {
+              const arg = dockerBuildArgs.find((a) => a.key === def.key)
+              const val = arg?.value !== undefined ? arg.value : (def.defaultValue || '')
+              return { key: def.key, value: val.trim() }
+            })
+            .filter((a) => a.key && a.value),
         }),
       })
       if (res.ok) {
         setSaveSuccess(true)
         setTimeout(() => setSaveSuccess(false), 2000)
         onProjectUpdated()
+      } else {
+        const errData = await res.json().catch(() => ({}))
+        setSaveError(errData.error || '保存项目配置失败')
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to save project config', err)
+      setSaveError('网络请求异常: ' + (err?.message || '未知错误'))
     } finally {
       setSaving(false)
     }
@@ -192,11 +352,41 @@ export function ProjectDetailModal({
   }
 
   const addEnvVar = () => {
-    setEnvVars([...envVars, { key: '', value: '', isSecret: false }])
+    const updated = [...envVars, { key: '', value: '', isSecret: false }]
+    setEnvVars(updated)
+    syncEnvVarsWithStartCommand(updated)
   }
 
   const removeEnvVar = (index: number) => {
-    setEnvVars(envVars.filter((_, i) => i !== index))
+    const updated = envVars.filter((_, i) => i !== index)
+    setEnvVars(updated)
+    syncEnvVarsWithStartCommand(updated)
+  }
+
+  const handleUpdateEnvVar = (index: number, field: keyof EnvVariable, val: any) => {
+    const updated = [...envVars]
+    updated[index] = { ...updated[index], [field]: val }
+    setEnvVars(updated)
+    syncEnvVarsWithStartCommand(updated)
+  }
+
+  const handleImportPresetEnvVars = () => {
+    const presets: EnvVariable[] = (currentPlugin.sampleEnvVars || []).map((preset) => ({
+      key: preset.key,
+      value:
+        preset.key.toUpperCase() === 'PORT'
+          ? (formData.serverPort && formData.serverPort[0]
+              ? String(formData.serverPort[0])
+              : String(currentPlugin.defaultPort))
+          : preset.value,
+      isSecret: false,
+    }))
+    const existingMap = new Map<string, EnvVariable>()
+    envVars.forEach((e) => existingMap.set(e.key, e))
+    presets.forEach((p) => existingMap.set(p.key, p))
+    const merged = Array.from(existingMap.values())
+    setEnvVars(merged)
+    syncEnvVarsWithStartCommand(merged)
   }
 
   return (
@@ -229,7 +419,12 @@ export function ProjectDetailModal({
                 <span>•</span>
                 <span>分支: {project.branch}</span>
                 <span>•</span>
-                <span>服务器: {project.serverName} ({project.serverIp}:{project.port})</span>
+                <span>
+                  服务器: {project.serverName} ({project.serverIp}
+                  {project.deployTargetMode === 'docker' && project.portMappings && project.portMappings.length > 0
+                    ? ` ${project.portMappings.map((m) => `:${m.host}➔:${m.container}`).join(' ')}`
+                    : `:${project.serverPort && project.serverPort.length > 0 ? project.serverPort.join(', :') : '3000'}`})
+                </span>
               </p>
             </div>
           </div>
@@ -299,12 +494,33 @@ export function ProjectDetailModal({
             <div className="space-y-5">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="text-xs font-semibold text-muted-foreground">项目名称</label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-muted-foreground">项目名称</label>
+                    <span className="text-[11px] text-muted-foreground">
+                      仅限小写字母、数字、"-" 及 "_"
+                    </span>
+                  </div>
                   <Input
                     value={formData.name}
-                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    className="mt-1"
+                    onChange={(e) => {
+                      setSaveError('')
+                      setFormData({ ...formData, name: e.target.value })
+                    }}
+                    className={`mt-1 font-mono text-sm ${
+                      formData.name && !validateProjectName(formData.name).valid
+                        ? 'border-destructive focus-visible:ring-destructive'
+                        : ''
+                    }`}
                   />
+                  {formData.name && !validateProjectName(formData.name).valid ? (
+                    <p className="text-[11px] text-destructive mt-1 flex items-center gap-1">
+                      <span>{validateProjectName(formData.name).error}</span>
+                    </p>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground/70 mt-1">
+                      格式规范：只能包含小写英文字母、数字、"-" 及 "_"，且不能以数字开头和不能包含空格。
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className="text-xs font-semibold text-muted-foreground">默认 Git 分支</label>
@@ -331,15 +547,169 @@ export function ProjectDetailModal({
                     className="mt-1 font-mono text-sm"
                   />
                 </div>
-                <div>
-                  <label className="text-xs font-semibold text-muted-foreground">服务监听端口</label>
-                  <Input
-                    type="number"
-                    value={formData.port}
-                    onChange={(e) => setFormData({ ...formData, port: Number(e.target.value) })}
-                    className="mt-1 font-mono text-sm"
-                  />
-                </div>
+                {formData.deployTargetMode === 'docker' ? (
+                  <div className="md:col-span-2 space-y-2 rounded-lg border border-border/80 bg-muted/20 p-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <label className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                          <Boxes className="size-3.5 text-primary" />
+                          Docker 端口映射配置 (宿主机外部端口 ➔ 容器内部端口)
+                        </label>
+                        <p className="text-[11px] text-muted-foreground mt-0.5">
+                          宿主机端口为外部访问端口；容器内部端口为应用监听端口，两者可独立配置。
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={handleAddPortMapping}
+                        className="h-7 text-xs text-primary gap-1 border-primary/30 hover:bg-primary/10"
+                      >
+                        <Plus className="size-3.5" /> 添加映射
+                      </Button>
+                    </div>
+
+                    <div className="space-y-2 pt-1">
+                      {(formData.portMappings || [{ host: 3000, container: 3000 }]).map((m, idx) => (
+                        <div key={idx} className="flex items-center gap-2 p-2 rounded-md border bg-background">
+                          <div className="flex-1">
+                            <span className="text-[10px] text-muted-foreground">宿主机外部端口 (Host)</span>
+                            <Input
+                              type="number"
+                              min={1}
+                              max={65535}
+                              value={m.host || ''}
+                              onChange={(e) => handlePortMappingUpdate(idx, 'host', parseInt(e.target.value, 10))}
+                              placeholder="如 8080"
+                              className="mt-0.5 font-mono text-xs h-8"
+                            />
+                          </div>
+                          <div className="text-muted-foreground pt-4 text-xs font-bold shrink-0">➔</div>
+                          <div className="flex-1">
+                            <span className="text-[10px] text-muted-foreground">容器内部端口 (Container)</span>
+                            <Input
+                              type="number"
+                              min={1}
+                              max={65535}
+                              value={m.container || ''}
+                              onChange={(e) => handlePortMappingUpdate(idx, 'container', parseInt(e.target.value, 10))}
+                              placeholder={`如 ${currentPlugin.defaultPort}`}
+                              className="mt-0.5 font-mono text-xs h-8"
+                            />
+                          </div>
+                          {(formData.portMappings?.length || 0) > 1 && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => handleRemovePortMapping(idx)}
+                              className="mt-4 size-8 text-muted-foreground hover:text-destructive shrink-0"
+                              title="删除此映射"
+                            >
+                              <Trash2 className="size-3.5" />
+                            </Button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                      {(formData.portMappings || []).map((m, idx) => (
+                        <span
+                          key={idx}
+                          className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${
+                            idx === 0
+                              ? 'bg-primary/10 text-primary border-primary/20 font-medium'
+                              : 'bg-muted text-foreground border-border'
+                          }`}
+                        >
+                          -p {m.host}:{m.container} {idx === 0 && <span className="text-[10px] text-primary/70">(主映射)</span>}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-semibold text-muted-foreground">服务监听端口 (宿主机)</label>
+                      <span className="text-[10px] text-muted-foreground">多端口用逗号分隔</span>
+                    </div>
+                    <Input
+                      value={portInput}
+                      onChange={(e) => {
+                        const val = e.target.value
+                        setPortInput(val)
+                        const parsed = val
+                          .split(/[,，\s]+/)
+                          .map((p) => parseInt(p.trim(), 10))
+                          .filter((p) => !isNaN(p) && p > 0 && p <= 65535)
+                        if (parsed.length > 0) {
+                          setFormData((prev) => {
+                            const slug = toSafeSlug(prev.name || project.name)
+                            const newStart = currentPlugin.getStartCommand(slug, parsed, {
+                              mode: prev.deployTargetMode,
+                              envVars,
+                            })
+                            return {
+                              ...prev,
+                              serverPort: parsed,
+                              containerPort: parsed,
+                              portMappings: parsed.map((p) => ({ host: p, container: p })),
+                              startCommand: newStart,
+                            }
+                          })
+                        }
+                      }}
+                      placeholder="例如: 3000, 8080"
+                      className="mt-1 font-mono text-sm"
+                    />
+                    {formData.serverPort && formData.serverPort.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                        {formData.serverPort.map((p, idx) => (
+                          <span
+                            key={p}
+                            className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${
+                              idx === 0
+                                ? 'bg-primary/10 text-primary border-primary/20 font-medium'
+                                : 'bg-muted text-foreground border-border'
+                            }`}
+                          >
+                            :{p} {idx === 0 && <span className="text-[10px] text-primary/70">(主端口)</span>}
+                            {formData.serverPort.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const updated = formData.serverPort.filter((_, i) => i !== idx)
+                                  if (updated.length > 0) {
+                                    setPortInput(updated.join(', '))
+                                    setFormData((prev) => {
+                                      const slug = toSafeSlug(prev.name || project.name)
+                                      const newStart = currentPlugin.getStartCommand(slug, updated, {
+                                        mode: prev.deployTargetMode,
+                                        envVars,
+                                      })
+                                      return {
+                                        ...prev,
+                                        serverPort: updated,
+                                        containerPort: updated,
+                                        portMappings: updated.map((p) => ({ host: p, container: p })),
+                                        startCommand: newStart,
+                                      }
+                                    })
+                                  }
+                                }}
+                                className="hover:text-destructive text-muted-foreground ml-0.5"
+                              >
+                                ×
+                              </button>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div className="md:col-span-2">
                   <label className="text-xs font-semibold text-muted-foreground">健康检查探针 URL</label>
                   <Input
@@ -361,6 +731,12 @@ export function ProjectDetailModal({
                   </select>
                 </div>
               </div>
+
+              {saveError && (
+                <div className="p-2.5 rounded-lg bg-destructive/10 border border-destructive/25 text-destructive text-xs">
+                  {saveError}
+                </div>
+              )}
 
               <div className="flex justify-end pt-2">
                 <Button onClick={handleSaveConfig} disabled={saving} className="gap-2">
@@ -412,6 +788,75 @@ export function ProjectDetailModal({
                     placeholder="npm run build 或 dotnet publish"
                   />
                 </div>
+
+                {/* Docker 构建参数 (ARG) 配置 —— 仅在 Docker 模式且当前运行时声明了 dockerBuildArgs 时显示 */}
+                {formData.deployTargetMode === 'docker' && currentPlugin.dockerBuildArgs && currentPlugin.dockerBuildArgs.length > 0 && (
+                  <div className="p-4 rounded-lg border border-violet-500/30 bg-violet-500/5 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <div className="size-5 rounded bg-violet-500/20 text-violet-400 flex items-center justify-center">
+                        <FileCode className="size-3" />
+                      </div>
+                      <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                        Docker 构建参数 (Build Args)
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400 font-medium">
+                        Dockerfile ARG
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground leading-snug">
+                      以下参数在 <code className="text-violet-400">docker build</code> 时通过{' '}
+                      <code className="text-violet-400">--build-arg</code> 注入，对应 Dockerfile 中的 ARG 指令。
+                    </p>
+                    <div className="space-y-2.5">
+                      {currentPlugin.dockerBuildArgs.map((argDef) => {
+                        const currentArg = dockerBuildArgs.find((a) => a.key === argDef.key)
+                        const val = currentArg?.value !== undefined ? currentArg.value : (argDef.defaultValue || '')
+                        return (
+                          <div key={argDef.key}>
+                            <label className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
+                              <code className="text-violet-400 font-mono">{argDef.key}</code>
+                              {argDef.required && <span className="text-destructive">*</span>}
+                              <span className="font-normal text-muted-foreground/70">— {argDef.description}</span>
+                            </label>
+                            <Input
+                              value={val}
+                              onChange={(e) => {
+                                const newArgs = (currentPlugin.dockerBuildArgs || []).map((def) => {
+                                  if (def.key === argDef.key) {
+                                    return { key: def.key, value: e.target.value }
+                                  }
+                                  const existing = dockerBuildArgs.find((a) => a.key === def.key)
+                                  return { key: def.key, value: existing?.value !== undefined ? existing.value : (def.defaultValue || '') }
+                                })
+                                setDockerBuildArgs(newArgs)
+                              }}
+                              className="mt-1 font-mono text-sm"
+                              placeholder={argDef.placeholder || argDef.defaultValue || ''}
+                            />
+                          </div>
+                        )
+                      })}
+                    </div>
+
+                    {/* 实时构建命令预览 */}
+                    <div className="pt-2 border-t border-violet-500/20">
+                      <span className="text-[10px] text-muted-foreground block mb-1">
+                        预计 Docker 构建命令预览 (流水线自动注入 --build-arg):
+                      </span>
+                      <div className="p-2 rounded bg-black/40 border border-violet-500/20 font-mono text-[11px] text-violet-300 break-all select-all">
+                        <span className="text-muted-foreground select-none">$ </span>
+                        docker build {(() => {
+                          const args = (currentPlugin.dockerBuildArgs || []).map((def) => {
+                            const userArg = dockerBuildArgs.find((a) => a.key === def.key)
+                            const val = userArg?.value !== undefined ? userArg.value : (def.defaultValue || '')
+                            return { key: def.key, value: val }
+                          }).filter((a) => a.key && a.value)
+                          return args.length > 0 ? args.map((a) => `--build-arg ${a.key}="${a.value}"`).join(' ') + ' ' : ''
+                        })()}-t {toSafeSlug(formData.name)}:latest .
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Stage 3: Docker Delivery Mechanism */}
                 <div className="p-4 rounded-lg border border-border bg-card space-y-3">
@@ -656,10 +1101,51 @@ export function ProjectDetailModal({
                     在构建与部署时自动注入到执行环境中（敏感信息如密钥将加密掩码展示）
                   </p>
                 </div>
-                <Button size="sm" variant="outline" onClick={addEnvVar} className="gap-1.5">
-                  <Plus className="size-4" />
-                  添加变量
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleImportPresetEnvVars}
+                    className="gap-1.5"
+                  >
+                    <Sparkles className="size-3.5 text-primary" />
+                    导入技术栈预设
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={addEnvVar} className="gap-1.5">
+                    <Plus className="size-4" />
+                    添加变量
+                  </Button>
+                </div>
+              </div>
+
+              {/* 启动指令与环境变量联动实时预览卡片 */}
+              <div className="p-3.5 rounded-lg border border-border/80 bg-muted/20 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                    <Terminal className="size-3.5 text-primary" />
+                    启动指令与环境变量联动预览
+                  </span>
+                  <span className="text-[10px] text-muted-foreground font-mono">
+                    {formData.deployTargetMode === 'docker' ? 'Docker 容器启动 (-e 参数注入)' : '原生宿主机启动 (export / .env 注入)'}
+                  </span>
+                </div>
+                {formData.deployTargetMode === 'docker' ? (
+                  <div className="p-2.5 rounded bg-black/50 border border-border/60 font-mono text-xs text-blue-300 break-all select-all leading-relaxed">
+                    <span className="text-muted-foreground select-none">$ </span>
+                    {formData.startCommand}
+                  </div>
+                ) : (
+                  <div className="p-2.5 rounded bg-black/50 border border-border/60 font-mono text-xs text-amber-300 break-all select-all leading-relaxed">
+                    <span className="text-muted-foreground select-none">$ </span>
+                    {(() => {
+                      const validEnvs = envVars.filter((e) => e.key && e.key.trim())
+                      const prefix = validEnvs.length > 0
+                        ? validEnvs.map((e) => `export ${e.key}="${e.value}"`).join(' && ') + ' && '
+                        : ''
+                      return prefix + (formData.startCommand || 'npm start')
+                    })()}
+                  </div>
+                )}
               </div>
 
               {envVars.length === 0 ? (
@@ -673,11 +1159,7 @@ export function ProjectDetailModal({
                       <Input
                         placeholder="变量名 (如 PORT, NODE_ENV)"
                         value={env.key}
-                        onChange={(e) => {
-                          const updated = [...envVars]
-                          updated[idx].key = e.target.value
-                          setEnvVars(updated)
-                        }}
+                        onChange={(e) => handleUpdateEnvVar(idx, 'key', e.target.value)}
                         className="w-1/3 font-mono text-xs"
                       />
                       <div className="relative flex-1">
@@ -685,11 +1167,7 @@ export function ProjectDetailModal({
                           type={env.isSecret && !showSecrets[idx] ? 'password' : 'text'}
                           placeholder="变量值"
                           value={env.value}
-                          onChange={(e) => {
-                            const updated = [...envVars]
-                            updated[idx].value = e.target.value
-                            setEnvVars(updated)
-                          }}
+                          onChange={(e) => handleUpdateEnvVar(idx, 'value', e.target.value)}
                           className="font-mono text-xs pr-10"
                         />
                         {env.isSecret && (
@@ -712,11 +1190,7 @@ export function ProjectDetailModal({
                         <input
                           type="checkbox"
                           checked={env.isSecret || false}
-                          onChange={(e) => {
-                            const updated = [...envVars]
-                            updated[idx].isSecret = e.target.checked
-                            setEnvVars(updated)
-                          }}
+                          onChange={(e) => handleUpdateEnvVar(idx, 'isSecret', e.target.checked)}
                           className="rounded border-border"
                         />
                         保密

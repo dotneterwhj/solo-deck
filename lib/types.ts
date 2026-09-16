@@ -22,7 +22,16 @@ export interface EnvVariable {
 
 export type ArtifactType = 'auto' | 'docker' | 'tar'
 
-export type DockerDeliveryMode = 'save_load' | 'registry' | 'auto'
+export type DockerDeliveryMode = 'auto' | 'save_load' | 'registry'
+
+/**
+ * Docker 构建参数 (对应 Dockerfile ARG 指令)
+ * 在 docker build 时通过 --build-arg KEY=VALUE 注入
+ */
+export interface DockerBuildArg {
+  key: string
+  value: string
+}
 
 export interface DockerRegistryConfig {
   enabled: boolean
@@ -31,6 +40,16 @@ export interface DockerRegistryConfig {
   username?: string
   password?: string
   defaultMode?: DockerDeliveryMode
+}
+
+/**
+ * 端口映射定义（支持 Docker 容器宿主机端口与容器端口独立映射）
+ * host: 宿主机外部暴露端口
+ * container: 容器内部应用监听端口
+ */
+export interface PortMapping {
+  host: number
+  container: number
 }
 
 export interface Project {
@@ -45,13 +64,16 @@ export interface Project {
   deployTargetMode?: DeployTargetMode
   artifactType?: ArtifactType
   dockerDeliveryMode?: DockerDeliveryMode
+  dockerBuildArgs?: DockerBuildArg[]
   dockerRegistry?: Partial<DockerRegistryConfig>
   status: ProjectStatus
   serverId?: string
   serverIp: string
   serverName: string
   serverTags?: string[]
-  port: number
+  serverPort: number[]
+  containerPort?: number[]
+  portMappings?: PortMapping[]
   deployPath: string
   installCommand: string
   buildCommand: string
