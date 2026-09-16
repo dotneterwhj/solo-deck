@@ -22,6 +22,13 @@ export async function POST(req: NextRequest) {
       user: { username },
     })
 
+    // 动态检测协议：支持直连 HTTPS 或 Nginx 反代 (X-Forwarded-Proto)，避免 HTTP 协议（如云服务器直接 IP:端口访问）下 Cookie 被浏览器丢弃
+    const forwardedProto = req.headers.get('x-forwarded-proto')
+    const isHttps =
+      process.env.AUTH_COOKIE_SECURE !== undefined
+        ? process.env.AUTH_COOKIE_SECURE === 'true'
+        : req.nextUrl.protocol === 'https:' || forwardedProto === 'https'
+
     // 设置安全 HttpOnly 会话 Cookie
     response.cookies.set({
       name: AUTH_COOKIE_NAME,
@@ -30,7 +37,7 @@ export async function POST(req: NextRequest) {
       path: '/',
       sameSite: 'lax',
       maxAge: maxAgeSeconds,
-      secure: process.env.NODE_ENV === 'production',
+      secure: isHttps,
     })
 
     return response
