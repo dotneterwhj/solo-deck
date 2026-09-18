@@ -158,6 +158,56 @@ export function extractPortMappingsFromCommand(cmd: string): PortMapping[] {
   return mappings
 }
 
+import { getCarrierCommandStrategy } from '../carriers/command-strategy'
+
+/**
+ * 调整端口时安全更新 startCommand，保护用户手动修改过的命令内容 (由各部署载体策略多态处理)
+ */
+export function safeUpdateStartCommandOnPortChange(
+  currentCmd: string,
+  newPorts: number[] | PortMapping[],
+  mode: DeployTargetMode = 'docker',
+  isCustomized: boolean = false,
+  currentPlugin?: IRuntimePlugin,
+  slug?: string,
+  envVars?: { key: string; value: string }[],
+  oldPorts?: number[]
+): string {
+  const strategy = getCarrierCommandStrategy(mode)
+  return strategy.updateStartCommandOnPortChange(
+    currentCmd,
+    newPorts,
+    isCustomized,
+    currentPlugin as IRuntimePlugin,
+    slug || 'app',
+    envVars,
+    oldPorts
+  )
+}
+
+/**
+ * 调整环境变量时安全更新 startCommand，保护用户手动修改过的命令内容 (由各部署载体策略多态处理)
+ */
+export function safeUpdateStartCommandOnEnvChange(
+  currentCmd: string,
+  updatedEnvVars: { key: string; value: string }[],
+  mode: DeployTargetMode = 'docker',
+  isCustomized: boolean = false,
+  currentPlugin?: IRuntimePlugin,
+  slug?: string,
+  ports?: number[] | PortMapping[]
+): string {
+  const strategy = getCarrierCommandStrategy(mode)
+  return strategy.updateStartCommandOnEnvChange(
+    currentCmd,
+    updatedEnvVars,
+    isCustomized,
+    currentPlugin as IRuntimePlugin,
+    slug || 'app',
+    ports
+  )
+}
+
 export abstract class BaseRuntimePlugin implements IRuntimePlugin {
   abstract readonly id: string
   abstract readonly name: string
@@ -184,21 +234,19 @@ export abstract class BaseRuntimePlugin implements IRuntimePlugin {
   readonly keyFeatures?: string[] = []
   readonly placementPath: string = '项目代码根目录 / Dockerfile'
 
+  /**
+   * 原生服务启动命令生成 (纯原生技术栈实现，子类按需覆写自定义原生进程启动行为)
+   */
+  getNativeStartCommand(_projectName?: string, _port?: number | number[] | PortMapping[]): string {
+    return this.defaultNativeStartCmd
+  }
+
   getInstallCommand(projectName?: string, options?: { mode?: DeployTargetMode; versionTag?: string }): string {
-    const mode = options?.mode || 'docker'
-    if (mode === 'native') {
-      return this.defaultNativeInstallCmd
-    }
-    return `docker version`
+    return getCarrierCommandStrategy(options?.mode).getInstallCommand(this, projectName)
   }
 
   getBuildCommand(projectName?: string, options?: { mode?: DeployTargetMode; versionTag?: string }): string {
-    const mode = options?.mode || 'docker'
-    if (mode === 'native') {
-      return this.defaultNativeBuildCmd
-    }
-    const slug = toSafeSlug(projectName)
-    return `docker build -t ${slug}:latest .`
+    return getCarrierCommandStrategy(options?.mode).getBuildCommand(this, projectName)
   }
 
   /**
@@ -271,22 +319,16 @@ export abstract class BaseRuntimePlugin implements IRuntimePlugin {
       portMappings?: PortMapping[]
     }
   ): string {
-    const mode = options?.mode || 'docker'
-    if (mode === 'native') {
-      return this.defaultNativeStartCmd
-    }
-    const slug = toSafeSlug(projectName)
-    const mappings = this.resolvePortMappings(port, options)
-    const portFlags = mappings.map((m) => `-p ${m.host}:${m.container}`).join(' ')
-    const baseCmd = `docker run -d ${portFlags} --name ${slug} ${slug}:latest`
-    return updateDockerRunEnvVars(baseCmd, options?.envVars)
+    return getCarrierCommandStrategy(options?.mode).getStartCommand(
+      this,
+      projectName,
+      options?.portMappings || port,
+      options?.envVars
+    )
   }
 
   getRequiredTools(mode: DeployTargetMode = 'docker'): string[] {
-    if (mode === 'docker') {
-      return this.requiredDockerTools
-    }
-    return this.requiredNativeTools
+    return getCarrierCommandStrategy(mode).getRequiredTools(this)
   }
 
   toDockerfileTemplate(): DockerfileTemplate {
@@ -298,8 +340,8 @@ export abstract class BaseRuntimePlugin implements IRuntimePlugin {
       defaultPort: String(this.defaultPort),
       baseImage: this.baseImage,
       placementPath: this.placementPath,
-      sampleBuildCmd: this.getBuildCommand('app', { mode: 'docker' }),
-      sampleStartCmd: this.getStartCommand('app', this.defaultPort, { mode: 'docker' }),
+      sampleBuildCmd: getCarrierCommandStrategy('docker').getBuildCommand(this, 'app'),
+      sampleStartCmd: getCarrierCommandStrategy('docker').getStartCommand(this, 'app', [this.defaultPort]),
       keyFeatures: this.keyFeatures || [],
       dockerfile: this.dockerfileTemplate,
       dockerignore: this.dockerignoreTemplate,

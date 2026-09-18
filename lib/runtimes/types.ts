@@ -3,7 +3,7 @@ export interface PortMapping {
   container: number
 }
 
-export type DeployTargetMode = 'docker' | 'native'
+export type DeployTargetMode = 'docker' | 'native' | 'docker_compose'
 
 /**
  * 运行时插件声明的 Docker 构建参数定义 (对应 Dockerfile 中的 ARG 指令)
@@ -60,6 +60,7 @@ export interface IRuntimePlugin {
   readonly requiredNativeTools: string[]
   readonly nativeProcessManager: string
   readonly nativeRequirementDesc: string
+  getNativeStartCommand?(projectName?: string, port?: number | number[] | PortMapping[]): string
 
   // Docker 容器化交付规范
   readonly dockerfileTemplate: string

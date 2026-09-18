@@ -13,7 +13,7 @@ export interface AuthConfig {
 const CONFIG_DIR = path.join(process.cwd(), 'config')
 const CONFIG_FILE = path.join(CONFIG_DIR, 'auth.json')
 
-export const AUTH_COOKIE_NAME = 'cdpipeline_session'
+export const AUTH_COOKIE_NAME = 'solodeck_session'
 
 export const DEFAULT_AUTH_CONFIG: AuthConfig = {
   enabled: true,
@@ -74,7 +74,7 @@ export function verifyCredentials(inputUser: string, inputPass: string): boolean
  */
 function getSigningSecret(): string {
   const config = getAuthConfig()
-  return process.env.AUTH_SECRET || `salt_${config.username}_${config.password}_cdpipeline_2026`
+  return process.env.AUTH_SECRET || `salt_${config.username}_${config.password}_solodeck_2026`
 }
 
 /**

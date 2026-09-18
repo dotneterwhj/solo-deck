@@ -8,7 +8,7 @@ export type BuiltinRuntimeType =
 
 export type RuntimeType = BuiltinRuntimeType | (string & {})
 
-export type DeployTargetMode = 'docker' | 'native'
+export type DeployTargetMode = 'docker' | 'native' | 'docker_compose'
 
 export type ProjectStatus = 'active' | 'stopped' | 'error' | 'deploying'
 
@@ -237,7 +237,7 @@ export interface SystemNotification {
     deploymentId?: string
     serverId?: string
     serverName?: string
-    link?: 'dashboard' | 'list' | 'servers' | 'settings' | 'deployment' | 'project'
+    link?: 'dashboard' | 'projects' | 'servers' | 'settings' | 'deployment' | 'project'
     [key: string]: any
   }
 }

@@ -31,8 +31,16 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Project, Deployment, EnvVariable, ArtifactType, DockerDeliveryMode, DeployTargetMode, DockerBuildArg, PortMapping } from '@/lib/types'
 import { DockerfileGuideModal } from '@/components/guides/dockerfile-guide-modal'
-import { getRuntime, getAllRuntimes, toSafeSlug } from '@/lib/runtimes'
+import {
+  getRuntime,
+  getAllRuntimes,
+  toSafeSlug,
+  safeUpdateStartCommandOnPortChange,
+  safeUpdateStartCommandOnEnvChange,
+} from '@/lib/runtimes'
+import { getCarrierCommandStrategy } from '@/lib/carriers/command-strategy'
 import { validateProjectName } from '@/lib/validators'
+import { detectGitProvider, getGitAuthHint } from '@/lib/git-utils'
 
 interface ProjectDetailModalProps {
   project: Project
@@ -65,6 +73,8 @@ export function ProjectDetailModal({
     name: project.name,
     description: project.description || '',
     branch: project.branch,
+    gitUsername: project.gitUsername || '',
+    gitToken: project.gitToken || '',
     installCommand: project.installCommand,
     buildCommand: project.buildCommand,
     startCommand: project.startCommand,
@@ -75,9 +85,9 @@ export function ProjectDetailModal({
     portMappings: project.portMappings && project.portMappings.length > 0
       ? project.portMappings
       : (project.serverPort && project.serverPort.length > 0 ? project.serverPort : [3000]).map((h, i) => ({
-          host: h,
-          container: (project.containerPort && project.containerPort[i]) || h,
-        })),
+        host: h,
+        container: (project.containerPort && project.containerPort[i]) || h,
+      })),
     healthCheckUrl: project.healthCheckUrl || '',
     runnerMode: project.runnerMode,
     deployTargetMode: (project.deployTargetMode || 'docker') as DeployTargetMode,
@@ -91,6 +101,7 @@ export function ProjectDetailModal({
   const [saving, setSaving] = useState(false)
   const [saveSuccess, setSaveSuccess] = useState(false)
   const [saveError, setSaveError] = useState('')
+  const [isStartCommandCustomized, setIsStartCommandCustomized] = useState(false)
 
   useEffect(() => {
     if (project) {
@@ -114,61 +125,60 @@ export function ProjectDetailModal({
   }, [project.runtime])
 
   const handleDeployTargetModeChange = (mode: DeployTargetMode) => {
-    const isDocker = mode === 'docker'
+    setIsStartCommandCustomized(false)
+    const strategy = getCarrierCommandStrategy(mode)
     const slug = toSafeSlug(formData.name)
     const mappings = formData.portMappings && formData.portMappings.length > 0
       ? formData.portMappings
       : [{ host: currentPlugin.defaultPort, container: currentPlugin.defaultPort }]
-    let newBuild = formData.buildCommand
-    let newStart = formData.startCommand
 
-    if (isDocker) {
-      if (!newBuild || !newBuild.includes('docker build')) {
-        newBuild = currentPlugin.getBuildCommand(slug, { mode: 'docker' })
-      }
-      if (!newStart || !newStart.includes('docker run')) {
-        newStart = currentPlugin.getStartCommand(slug, mappings, { mode: 'docker', envVars })
-      }
-    } else {
-      if (!newBuild || newBuild.includes('docker build')) {
-        newBuild = currentPlugin.getBuildCommand(slug, { mode: 'native' })
-      }
-      if (!newStart || newStart.includes('docker run')) {
-        newStart = currentPlugin.getStartCommand(slug, mappings.map((m) => m.host), { mode: 'native', envVars })
-      }
-    }
+    const newBuild = strategy.getBuildCommand(currentPlugin, slug)
+    const newStart = strategy.getStartCommand(currentPlugin, slug, mappings, envVars)
 
     setFormData((prev) => ({
       ...prev,
       deployTargetMode: mode,
-      artifactType: isDocker ? 'docker' : 'tar',
+      artifactType: mode === 'docker' ? 'docker' : 'tar',
       buildCommand: newBuild,
       startCommand: newStart,
     }))
+  }
+
+  const handleResetStartCommand = () => {
+    setIsStartCommandCustomized(false)
+    const strategy = getCarrierCommandStrategy(formData.deployTargetMode)
+    const slug = toSafeSlug(formData.name || project.name)
+    const mappings = formData.portMappings && formData.portMappings.length > 0
+      ? formData.portMappings
+      : [{ host: currentPlugin.defaultPort, container: currentPlugin.defaultPort }]
+    const defaultCmd = strategy.getStartCommand(currentPlugin, slug, mappings, envVars)
+    setFormData((prev) => ({ ...prev, startCommand: defaultCmd }))
   }
 
   // Env vars
   const [envVars, setEnvVars] = useState<EnvVariable[]>(project.envVars || [])
   const [showSecrets, setShowSecrets] = useState<Record<number, boolean>>({})
 
-  // 同步环境变量变动至 startCommand (Docker 模式下重新生成 -e 参数)
+  // 同步环境变量变动至 startCommand (安全局部更新，杜绝覆盖用户自定义参数)
   const syncEnvVarsWithStartCommand = (updatedEnv: EnvVariable[]) => {
     setFormData((prev) => {
-      if (prev.deployTargetMode === 'docker') {
-        const slug = toSafeSlug(prev.name || project.name)
-        const mappings = prev.portMappings && prev.portMappings.length > 0
-          ? prev.portMappings
-          : [{ host: currentPlugin.defaultPort, container: currentPlugin.defaultPort }]
-        const updatedStart = currentPlugin.getStartCommand(slug, mappings, {
-          mode: 'docker',
-          envVars: updatedEnv,
-        })
-        return {
-          ...prev,
-          startCommand: updatedStart,
-        }
+      const slug = toSafeSlug(prev.name || project.name)
+      const mappings = prev.portMappings && prev.portMappings.length > 0
+        ? prev.portMappings
+        : [{ host: currentPlugin.defaultPort, container: currentPlugin.defaultPort }]
+      const updatedStart = safeUpdateStartCommandOnEnvChange(
+        prev.startCommand,
+        updatedEnv,
+        prev.deployTargetMode,
+        isStartCommandCustomized,
+        currentPlugin,
+        slug,
+        mappings
+      )
+      return {
+        ...prev,
+        startCommand: updatedStart,
       }
-      return prev
     })
   }
 
@@ -185,10 +195,16 @@ export function ProjectDetailModal({
       const hostPorts = updated.map((m) => m.host).filter((p) => !isNaN(p) && p > 0)
       const containerPorts = updated.map((m) => m.container).filter((p) => !isNaN(p) && p > 0)
       const slug = toSafeSlug(prev.name || project.name)
-      const newStart = currentPlugin.getStartCommand(slug, updated, {
-        mode: prev.deployTargetMode,
+      const newStart = safeUpdateStartCommandOnPortChange(
+        prev.startCommand,
+        updated,
+        prev.deployTargetMode,
+        isStartCommandCustomized,
+        currentPlugin,
+        slug,
         envVars,
-      })
+        prev.serverPort
+      )
 
       return {
         ...prev,
@@ -213,10 +229,16 @@ export function ProjectDetailModal({
       const hostPorts = updated.map((m) => m.host)
       const containerPorts = updated.map((m) => m.container)
       const slug = toSafeSlug(prev.name || project.name)
-      const newStart = currentPlugin.getStartCommand(slug, updated, {
-        mode: prev.deployTargetMode,
+      const newStart = safeUpdateStartCommandOnPortChange(
+        prev.startCommand,
+        updated,
+        prev.deployTargetMode,
+        isStartCommandCustomized,
+        currentPlugin,
+        slug,
         envVars,
-      })
+        prev.serverPort
+      )
       return {
         ...prev,
         portMappings: updated,
@@ -235,10 +257,16 @@ export function ProjectDetailModal({
       const hostPorts = updated.map((m) => m.host)
       const containerPorts = updated.map((m) => m.container)
       const slug = toSafeSlug(prev.name || project.name)
-      const newStart = currentPlugin.getStartCommand(slug, updated, {
-        mode: prev.deployTargetMode,
+      const newStart = safeUpdateStartCommandOnPortChange(
+        prev.startCommand,
+        updated,
+        prev.deployTargetMode,
+        isStartCommandCustomized,
+        currentPlugin,
+        slug,
         envVars,
-      })
+        prev.serverPort
+      )
       return {
         ...prev,
         portMappings: updated,
@@ -376,8 +404,8 @@ export function ProjectDetailModal({
       value:
         preset.key.toUpperCase() === 'PORT'
           ? (formData.serverPort && formData.serverPort[0]
-              ? String(formData.serverPort[0])
-              : String(currentPlugin.defaultPort))
+            ? String(formData.serverPort[0])
+            : String(currentPlugin.defaultPort))
           : preset.value,
       isSecret: false,
     }))
@@ -396,13 +424,12 @@ export function ProjectDetailModal({
         <div className="flex items-center justify-between border-b border-border px-6 py-4 bg-muted/20">
           <div className="flex items-center gap-3">
             <div
-              className={`size-3 rounded-full ${
-                project.status === 'active'
+              className={`size-3 rounded-full ${project.status === 'active'
                   ? 'bg-green-500 ring-4 ring-green-500/20'
                   : project.status === 'deploying'
                     ? 'bg-cyan-500 animate-pulse'
                     : 'bg-muted-foreground'
-              }`}
+                }`}
             />
             <div>
               <div className="flex items-center gap-2">
@@ -474,11 +501,10 @@ export function ProjectDetailModal({
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as TabType)}
-                className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-all shrink-0 ${
-                  active
+                className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-all shrink-0 ${active
                     ? 'border-primary text-primary font-semibold'
                     : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
-                }`}
+                  }`}
               >
                 <Icon className="size-4" />
                 {tab.label}
@@ -506,11 +532,10 @@ export function ProjectDetailModal({
                       setSaveError('')
                       setFormData({ ...formData, name: e.target.value })
                     }}
-                    className={`mt-1 font-mono text-sm ${
-                      formData.name && !validateProjectName(formData.name).valid
+                    className={`mt-1 font-mono text-sm ${formData.name && !validateProjectName(formData.name).valid
                         ? 'border-destructive focus-visible:ring-destructive'
                         : ''
-                    }`}
+                      }`}
                   />
                   {formData.name && !validateProjectName(formData.name).valid ? (
                     <p className="text-[11px] text-destructive mt-1 flex items-center gap-1">
@@ -538,6 +563,38 @@ export function ProjectDetailModal({
                     placeholder="请输入项目用途与描述"
                     className="mt-1"
                   />
+                </div>
+                <div>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-muted-foreground">Git 认证账号 (可选)</label>
+                    {detectGitProvider(project.repository) === 'gitlab' && (
+                      <span className="text-[10px] text-amber-500 font-mono">缺省默认: oauth2</span>
+                    )}
+                  </div>
+                  <Input
+                    value={formData.gitUsername}
+                    onChange={(e) => setFormData({ ...formData, gitUsername: e.target.value })}
+                    placeholder={
+                      detectGitProvider(project.repository) === 'gitlab'
+                        ? '留空自动适配 oauth2'
+                        : '例如：ci-bot (可留空)'
+                    }
+                    className="mt-1 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-muted-foreground">Personal Access Token (可选)</label>
+                  <Input
+                    type="password"
+                    value={formData.gitToken}
+                    onChange={(e) => setFormData({ ...formData, gitToken: e.target.value })}
+                    placeholder="glpat-xxxx / ghp_xxxx / 私有令牌"
+                    className="mt-1 text-sm font-mono"
+                  />
+                </div>
+                <div className="md:col-span-2 text-[11px] px-3 py-2 rounded-md bg-muted/40 text-muted-foreground border border-border/60 flex items-start gap-2 leading-relaxed">
+                  <span className="text-primary font-medium shrink-0">💡 提示:</span>
+                  <span>{getGitAuthHint(project.repository)}</span>
                 </div>
                 <div>
                   <label className="text-xs font-semibold text-muted-foreground">目标部署路径</label>
@@ -618,11 +675,10 @@ export function ProjectDetailModal({
                       {(formData.portMappings || []).map((m, idx) => (
                         <span
                           key={idx}
-                          className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${
-                            idx === 0
+                          className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${idx === 0
                               ? 'bg-primary/10 text-primary border-primary/20 font-medium'
                               : 'bg-muted text-foreground border-border'
-                          }`}
+                            }`}
                         >
                           -p {m.host}:{m.container} {idx === 0 && <span className="text-[10px] text-primary/70">(主映射)</span>}
                         </span>
@@ -647,10 +703,16 @@ export function ProjectDetailModal({
                         if (parsed.length > 0) {
                           setFormData((prev) => {
                             const slug = toSafeSlug(prev.name || project.name)
-                            const newStart = currentPlugin.getStartCommand(slug, parsed, {
-                              mode: prev.deployTargetMode,
+                            const newStart = safeUpdateStartCommandOnPortChange(
+                              prev.startCommand,
+                              parsed,
+                              prev.deployTargetMode,
+                              isStartCommandCustomized,
+                              currentPlugin,
+                              slug,
                               envVars,
-                            })
+                              prev.serverPort
+                            )
                             return {
                               ...prev,
                               serverPort: parsed,
@@ -669,11 +731,10 @@ export function ProjectDetailModal({
                         {formData.serverPort.map((p, idx) => (
                           <span
                             key={p}
-                            className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${
-                              idx === 0
+                            className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${idx === 0
                                 ? 'bg-primary/10 text-primary border-primary/20 font-medium'
                                 : 'bg-muted text-foreground border-border'
-                            }`}
+                              }`}
                           >
                             :{p} {idx === 0 && <span className="text-[10px] text-primary/70">(主端口)</span>}
                             {formData.serverPort.length > 1 && (
@@ -685,10 +746,16 @@ export function ProjectDetailModal({
                                     setPortInput(updated.join(', '))
                                     setFormData((prev) => {
                                       const slug = toSafeSlug(prev.name || project.name)
-                                      const newStart = currentPlugin.getStartCommand(slug, updated, {
-                                        mode: prev.deployTargetMode,
+                                      const newStart = safeUpdateStartCommandOnPortChange(
+                                        prev.startCommand,
+                                        updated,
+                                        prev.deployTargetMode,
+                                        isStartCommandCustomized,
+                                        currentPlugin,
+                                        slug,
                                         envVars,
-                                      })
+                                        prev.serverPort
+                                      )
                                       return {
                                         ...prev,
                                         serverPort: updated,
@@ -874,11 +941,10 @@ export function ProjectDetailModal({
                     <button
                       type="button"
                       onClick={() => handleDeployTargetModeChange('docker')}
-                      className={`p-2.5 rounded-lg border text-left transition-all ${
-                        formData.deployTargetMode === 'docker'
+                      className={`p-2.5 rounded-lg border text-left transition-all ${formData.deployTargetMode === 'docker'
                           ? 'border-blue-500 bg-blue-500/15 text-blue-300 font-semibold'
                           : 'border-border/80 hover:border-blue-500/40 text-muted-foreground'
-                      }`}
+                        }`}
                     >
                       <div className="flex items-center gap-1.5 text-xs font-semibold">
                         <Boxes className="size-3.5 text-blue-400" />
@@ -890,11 +956,10 @@ export function ProjectDetailModal({
                     <button
                       type="button"
                       onClick={() => handleDeployTargetModeChange('native')}
-                      className={`p-2.5 rounded-lg border text-left transition-all ${
-                        formData.deployTargetMode === 'native'
+                      className={`p-2.5 rounded-lg border text-left transition-all ${formData.deployTargetMode === 'native'
                           ? 'border-amber-500 bg-amber-500/15 text-amber-300 font-semibold'
                           : 'border-border/80 hover:border-amber-500/40 text-muted-foreground'
-                      }`}
+                        }`}
                     >
                       <div className="flex items-center gap-1.5 text-xs font-semibold">
                         <Terminal className="size-3.5 text-amber-500" />
@@ -943,11 +1008,10 @@ export function ProjectDetailModal({
                           <button
                             type="button"
                             onClick={() => setFormData({ ...formData, dockerDeliveryMode: 'auto', artifactType: 'docker' })}
-                            className={`p-2 rounded border text-left transition-all ${
-                              formData.dockerDeliveryMode === 'auto'
+                            className={`p-2 rounded border text-left transition-all ${formData.dockerDeliveryMode === 'auto'
                                 ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
                                 : 'border-border/80 hover:border-blue-500/40 text-muted-foreground'
-                            }`}
+                              }`}
                           >
                             <p className="text-xs font-semibold">自动策略 (推荐)</p>
                             <p className="text-[10px] text-muted-foreground mt-0.5">有 Registry 走仓库，无则直连</p>
@@ -956,11 +1020,10 @@ export function ProjectDetailModal({
                           <button
                             type="button"
                             onClick={() => setFormData({ ...formData, dockerDeliveryMode: 'save_load', artifactType: 'docker' })}
-                            className={`p-2 rounded border text-left transition-all ${
-                              formData.dockerDeliveryMode === 'save_load'
+                            className={`p-2 rounded border text-left transition-all ${formData.dockerDeliveryMode === 'save_load'
                                 ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
                                 : 'border-border/80 hover:border-blue-500/40 text-muted-foreground'
-                            }`}
+                              }`}
                           >
                             <p className="text-xs font-semibold">SFTP 离线直连</p>
                             <p className="text-[10px] text-muted-foreground mt-0.5">docker save ➔ SFTP ➔ load</p>
@@ -969,11 +1032,10 @@ export function ProjectDetailModal({
                           <button
                             type="button"
                             onClick={() => setFormData({ ...formData, dockerDeliveryMode: 'registry', artifactType: 'docker' })}
-                            className={`p-2 rounded border text-left transition-all ${
-                              formData.dockerDeliveryMode === 'registry'
+                            className={`p-2 rounded border text-left transition-all ${formData.dockerDeliveryMode === 'registry'
                                 ? 'border-blue-500 bg-blue-500/20 text-blue-300 font-semibold'
                                 : 'border-border/80 hover:border-blue-500/40 text-muted-foreground'
-                            }`}
+                              }`}
                           >
                             <p className="text-xs font-semibold">企业镜像仓库</p>
                             <p className="text-[10px] text-muted-foreground mt-0.5">docker push ➔ Registry ➔ pull</p>
@@ -1050,7 +1112,7 @@ export function ProjectDetailModal({
                           Docker 容器化部署规范：确保代码仓库根目录下存在 Dockerfile
                         </p>
                         <p className="text-muted-foreground text-[11px] mt-0.5">
-                          构建引擎将在项目根目录下执行 <code className="text-blue-400 font-mono">docker build .</code>。请确保已将标准 <code className="text-blue-400 font-mono">Dockerfile</code> (无后缀) 提交并推送至 Git 远程分支。
+                          构建引擎将在项目根目录下执行 <code className="text-blue-400 font-mono">docker build .</code>。请确保已将标准 <code className="text-blue-400 font-mono">Dockerfile</code> 提交并推送至 Git 远程分支。
                         </p>
                       </div>
                     </div>
@@ -1067,18 +1129,43 @@ export function ProjectDetailModal({
                   </div>
                 )}
 
-                  <div className="p-4 rounded-lg border border-border bg-card">
+                <div className="p-4 rounded-lg border border-border bg-card">
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-                      阶段 4: 启动/重载进程命令 (Start / Reload)
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                        阶段 4: 启动/重载进程命令 (Start / Reload)
+                      </span>
+                      {isStartCommandCustomized && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-500 border border-amber-500/20 font-medium">
+                          已手动自定义
+                        </span>
+                      )}
+                    </div>
+                    {isStartCommandCustomized && (
+                      <button
+                        type="button"
+                        onClick={handleResetStartCommand}
+                        className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        <RotateCcw className="size-3" />
+                        恢复默认命令
+                      </button>
+                    )}
                   </div>
                   <Input
                     value={formData.startCommand}
-                    onChange={(e) => setFormData({ ...formData, startCommand: e.target.value })}
+                    onChange={(e) => {
+                      setIsStartCommandCustomized(true)
+                      setFormData({ ...formData, startCommand: e.target.value })
+                    }}
                     className="font-mono text-sm"
                     placeholder="如: docker run -d ... 或 原生启动命令 (例: pm2 reload / gunicorn / dotnet / ./server)"
                   />
+                  {isStartCommandCustomized && (
+                    <p className="text-[11px] text-muted-foreground/70 mt-1">
+                      💡 提示：当前命令包含自定义修改，调整端口或环境变量将智能局部同步，不会覆盖您的自定义参数。
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -1243,7 +1330,7 @@ export function ProjectDetailModal({
               <div className="space-y-2">
                 <label className="text-xs font-semibold text-muted-foreground">本地测试 cURL 命令</label>
                 <pre className="p-3 rounded-lg bg-black/40 border border-border text-xs font-mono text-green-400 overflow-x-auto">
-{`curl -X POST "${webhookUrl}" \\
+                  {`curl -X POST "${webhookUrl}" \\
   -H "Content-Type: application/json" \\
   -d '{"after": "7f8b2c4", "head_commit": {"message": "feat: 自动化部署测试"}}'`}
                 </pre>
@@ -1282,15 +1369,14 @@ export function ProjectDetailModal({
                       <div className="space-y-1">
                         <div className="flex items-center gap-2">
                           <span
-                            className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
-                              dep.status === 'success'
+                            className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${dep.status === 'success'
                                 ? 'bg-green-500/10 text-green-500 border border-green-500/20'
                                 : dep.status === 'running'
                                   ? 'bg-cyan-500/10 text-cyan-500 border border-cyan-500/20 animate-pulse'
                                   : dep.status === 'cancelled'
                                     ? 'bg-yellow-500/10 text-yellow-500 border border-yellow-500/20'
                                     : 'bg-red-500/10 text-red-500 border border-red-500/20'
-                            }`}
+                              }`}
                           >
                             {dep.status === 'success'
                               ? '成功'

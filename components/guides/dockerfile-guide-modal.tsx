@@ -110,7 +110,7 @@ export function DockerfileGuideModal({
                 <code className="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 font-mono font-bold">
                   Dockerfile
                 </code>{' '}
-                (无文件后缀) 并保存在代码仓库的<strong>根目录</strong>中！
+                并保存在代码仓库的<strong>根目录</strong>中！
               </span>
             </div>
             <div className="flex items-center gap-2 shrink-0">
@@ -381,7 +381,7 @@ export function DockerfileGuideModal({
                   如何将 Dockerfile 正确放入您的项目？
                 </p>
                 <p className="text-muted-foreground">
-                  CDPipeline 采用自动化流水线在构建工作区执行{' '}
+                  Solo Deck 采用自动化流水线在构建工作区执行{' '}
                   <code className="text-blue-300 font-mono">docker build -t app:latest .</code>。
                   命令末尾的句点 <code className="text-blue-300 font-mono">.</code> 代表当前项目根目录，因此必须将 Dockerfile 保存在项目根目录！
                 </p>
@@ -396,7 +396,7 @@ export function DockerfileGuideModal({
                   </div>
                   <pre className="p-3 rounded bg-muted/30 border border-border font-mono text-xs text-neutral-300 leading-relaxed overflow-x-auto">
                     {`your-project-repository/
-├── 📄 Dockerfile           <-- [关键] 必须位于此处 (无后缀)
+├── 📄 Dockerfile           <-- [关键] 必须位于此处
 ├── 📄 .dockerignore        <-- [建议] 过滤不需要打包的文件
 ├── 📄 package.json         <-- (或 pom.xml / requirements.txt)
 ├── 📁 src/                 <-- 项目业务源代码
@@ -452,7 +452,7 @@ git push origin main`}
                       接下来：
                     </p>
                     <p>
-                      推送完成后，返回 CDPipeline 平台点击【立即部署】，系统将自动拉取最新代码并使用 Dockerfile 完成容器化打包与发布！
+                      推送完成后，返回 Solo Deck 平台点击【立即部署】，系统将自动拉取最新代码并使用 Dockerfile 完成容器化打包与发布！
                     </p>
                   </div>
                 </div>

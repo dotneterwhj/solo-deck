@@ -21,6 +21,7 @@ import {
   KeyRound,
   Sparkles,
   Copy,
+  RotateCcw,
 } from 'lucide-react'
 import {
   RuntimeType,
@@ -42,8 +43,12 @@ import {
   IRuntimePlugin,
   extractPortsFromCommand,
   extractPortMappingsFromCommand,
+  safeUpdateStartCommandOnPortChange,
+  safeUpdateStartCommandOnEnvChange,
 } from '@/lib/runtimes'
+import { getCarrierCommandStrategy } from '@/lib/carriers/command-strategy'
 import { validateProjectName } from '@/lib/validators'
+import { detectGitProvider, getGitAuthHint } from '@/lib/git-utils'
 
 type Step = 'basic' | 'git' | 'runtime' | 'env' | 'server' | 'confirm'
 
@@ -110,7 +115,7 @@ export function NewProjectWizard({
     deployTargetMode: 'docker',
     installCommand: 'npm install',
     buildCommand: 'docker build -t app:latest .',
-    startCommand: 'docker run -d -p 3000:3000 -e NODE_ENV="production" -e PORT="3000" --name app app:latest',
+    startCommand: 'docker run -d --restart unless-stopped -p 3000:3000 -e NODE_ENV="production" -e PORT="3000" --name app app:latest',
     selectedServerId: 'srv-001',
     serverName: '生产服务器 1',
     serverIp: '192.168.1.100',
@@ -132,23 +137,26 @@ export function NewProjectWizard({
   const [showDockerfileModal, setShowDockerfileModal] = useState(false)
   const [selectedDockerTemplate, setSelectedDockerTemplate] = useState<DockerfileTemplate>(DOCKERFILE_TEMPLATES[0])
   const [copiedDockerCode, setCopiedDockerCode] = useState(false)
+  const [isStartCommandCustomized, setIsStartCommandCustomized] = useState(false)
 
   const currentPlugin = useMemo(() => {
     return getRuntime(data.runtime) || getAllRuntimes()[0]
   }, [data.runtime])
 
   const handleDeployTargetModeChange = (mode: DeployTargetMode) => {
+    setIsStartCommandCustomized(false)
+    const strategy = getCarrierCommandStrategy(mode)
     const slug = toSafeSlug(data.projectName)
     const plugin = getRuntime(data.runtime) || getAllRuntimes()[0]
     const mappings =
       data.portMappings && data.portMappings.length > 0
         ? data.portMappings
         : data.serverPort.length > 0
-        ? data.serverPort.map((p) => ({ host: p, container: p }))
-        : [{ host: plugin.defaultPort, container: plugin.defaultPort }]
-    const install = plugin.getInstallCommand(slug, { mode })
-    const build = plugin.getBuildCommand(slug, { mode })
-    const start = plugin.getStartCommand(slug, mappings, { mode, envVars: data.envVars })
+          ? data.serverPort.map((p) => ({ host: p, container: p }))
+          : [{ host: plugin.defaultPort, container: plugin.defaultPort }]
+    const install = strategy.getInstallCommand(plugin, slug)
+    const build = strategy.getBuildCommand(plugin, slug)
+    const start = strategy.getStartCommand(plugin, slug, mappings, data.envVars)
 
     setData((prev) => ({
       ...prev,
@@ -229,14 +237,17 @@ export function NewProjectWizard({
       const newPath = shouldUpdatePath ? `/opt/apps/${slug}` : prev.serverPath
 
       const plugin = getRuntime(prev.runtime) || getAllRuntimes()[0]
+      const strategy = getCarrierCommandStrategy(prev.deployTargetMode)
       const mappings =
         prev.portMappings && prev.portMappings.length > 0
           ? prev.portMappings
           : prev.serverPort.length > 0
-          ? prev.serverPort.map((p) => ({ host: p, container: p }))
-          : [{ host: plugin.defaultPort, container: plugin.defaultPort }]
-      const newBuild = plugin.getBuildCommand(slug, { mode: prev.deployTargetMode })
-      const newStart = plugin.getStartCommand(slug, mappings, { mode: prev.deployTargetMode, envVars: prev.envVars })
+            ? prev.serverPort.map((p) => ({ host: p, container: p }))
+            : [{ host: plugin.defaultPort, container: plugin.defaultPort }]
+      const newBuild = strategy.getBuildCommand(plugin, slug)
+      const newStart = isStartCommandCustomized
+        ? prev.startCommand
+        : strategy.getStartCommand(plugin, slug, mappings, prev.envVars)
 
       return {
         ...prev,
@@ -249,11 +260,13 @@ export function NewProjectWizard({
   }
 
   const handleRuntimeSelect = (plugin: IRuntimePlugin) => {
+    setIsStartCommandCustomized(false)
     const slug = toSafeSlug(data.projectName)
     const port = plugin.defaultPort
     const mode = data.deployTargetMode || 'docker'
-    const install = plugin.getInstallCommand(slug, { mode })
-    const build = plugin.getBuildCommand(slug, { mode })
+    const strategy = getCarrierCommandStrategy(mode)
+    const install = strategy.getInstallCommand(plugin, slug)
+    const build = strategy.getBuildCommand(plugin, slug)
     const tmpl = plugin.toDockerfileTemplate()
 
     // 根据运行时插件声明的 Docker 构建参数定义，初始化 dockerBuildArgs（预填默认值）
@@ -270,7 +283,7 @@ export function NewProjectWizard({
     }))
 
     const mappings: PortMapping[] = [{ host: port, container: port }]
-    const start = plugin.getStartCommand(slug, mappings, { mode, envVars: presetEnvs })
+    const start = strategy.getStartCommand(plugin, slug, mappings, presetEnvs)
 
     setSelectedDockerTemplate(tmpl)
     setPortInput(String(port))
@@ -290,6 +303,7 @@ export function NewProjectWizard({
   }
 
   const handleStartCommandChange = (cmd: string) => {
+    setIsStartCommandCustomized(true)
     const extractedMappings = extractPortMappingsFromCommand(cmd)
     const extractedPorts = extractedMappings.length > 0 ? extractedMappings.map((m) => m.host) : extractPortsFromCommand(cmd)
     const extractedCPorts = extractedMappings.length > 0 ? extractedMappings.map((m) => m.container) : extractedPorts
@@ -298,18 +312,32 @@ export function NewProjectWizard({
       startCommand: cmd,
       ...(extractedPorts.length > 0
         ? {
-            serverPort: extractedPorts,
-            containerPort: extractedCPorts,
-            portMappings:
-              extractedMappings.length > 0
-                ? extractedMappings
-                : extractedPorts.map((p) => ({ host: p, container: p })),
-          }
+          serverPort: extractedPorts,
+          containerPort: extractedCPorts,
+          portMappings:
+            extractedMappings.length > 0
+              ? extractedMappings
+              : extractedPorts.map((p) => ({ host: p, container: p })),
+        }
         : {}),
     }))
     if (extractedPorts.length > 0) {
       setPortInput(extractedPorts.join(', '))
     }
+  }
+
+  const handleResetStartCommand = () => {
+    setIsStartCommandCustomized(false)
+    const strategy = getCarrierCommandStrategy(data.deployTargetMode)
+    const slug = toSafeSlug(data.projectName)
+    const mappings =
+      data.portMappings && data.portMappings.length > 0
+        ? data.portMappings
+        : data.serverPort.length > 0
+          ? data.serverPort.map((p) => ({ host: p, container: p }))
+          : [{ host: currentPlugin.defaultPort, container: currentPlugin.defaultPort }]
+    const defaultCmd = strategy.getStartCommand(currentPlugin, slug, mappings, data.envVars)
+    setData((prev) => ({ ...prev, startCommand: defaultCmd }))
   }
 
   const handleServerPortChange = (ports: number[]) => {
@@ -324,10 +352,16 @@ export function NewProjectWizard({
         host: p,
         container: (prev.containerPort && prev.containerPort[idx]) || p,
       }))
-      const updatedStart = plugin.getStartCommand(slug, mappings, {
-        mode: prev.deployTargetMode,
-        envVars: updatedEnvVars,
-      })
+      const updatedStart = safeUpdateStartCommandOnPortChange(
+        prev.startCommand,
+        mappings,
+        prev.deployTargetMode,
+        isStartCommandCustomized,
+        plugin,
+        slug,
+        updatedEnvVars,
+        prev.serverPort
+      )
       return {
         ...prev,
         serverPort: ports,
@@ -356,10 +390,16 @@ export function NewProjectWizard({
         e.key.toUpperCase() === 'PORT' ? { ...e, value: String(primaryContainerPort) } : e
       )
       const slug = toSafeSlug(prev.projectName)
-      const updatedStart = currentPlugin.getStartCommand(slug, updated, {
-        mode: prev.deployTargetMode,
-        envVars: updatedEnvVars,
-      })
+      const updatedStart = safeUpdateStartCommandOnPortChange(
+        prev.startCommand,
+        updated,
+        prev.deployTargetMode,
+        isStartCommandCustomized,
+        currentPlugin,
+        slug,
+        updatedEnvVars,
+        prev.serverPort
+      )
 
       return {
         ...prev,
@@ -384,10 +424,16 @@ export function NewProjectWizard({
       const hostPorts = updated.map((m) => m.host)
       const containerPorts = updated.map((m) => m.container)
       const slug = toSafeSlug(prev.projectName)
-      const updatedStart = currentPlugin.getStartCommand(slug, updated, {
-        mode: prev.deployTargetMode,
-        envVars: prev.envVars,
-      })
+      const updatedStart = safeUpdateStartCommandOnPortChange(
+        prev.startCommand,
+        updated,
+        prev.deployTargetMode,
+        isStartCommandCustomized,
+        currentPlugin,
+        slug,
+        prev.envVars,
+        prev.serverPort
+      )
       return {
         ...prev,
         portMappings: updated,
@@ -410,10 +456,16 @@ export function NewProjectWizard({
         e.key.toUpperCase() === 'PORT' ? { ...e, value: String(primaryContainerPort) } : e
       )
       const slug = toSafeSlug(prev.projectName)
-      const updatedStart = currentPlugin.getStartCommand(slug, updated, {
-        mode: prev.deployTargetMode,
-        envVars: updatedEnvVars,
-      })
+      const updatedStart = safeUpdateStartCommandOnPortChange(
+        prev.startCommand,
+        updated,
+        prev.deployTargetMode,
+        isStartCommandCustomized,
+        currentPlugin,
+        slug,
+        updatedEnvVars,
+        prev.serverPort
+      )
       return {
         ...prev,
         portMappings: updated,
@@ -437,10 +489,16 @@ export function NewProjectWizard({
       const updated = prev.envVars.filter((_, i) => i !== index)
       const slug = toSafeSlug(prev.projectName)
       const plugin = getRuntime(prev.runtime) || getAllRuntimes()[0]
-      const updatedStart = plugin.getStartCommand(slug, prev.serverPort, {
-        mode: prev.deployTargetMode,
-        envVars: updated,
-      })
+      const mappings = prev.portMappings && prev.portMappings.length > 0 ? prev.portMappings : prev.serverPort
+      const updatedStart = safeUpdateStartCommandOnEnvChange(
+        prev.startCommand,
+        updated,
+        prev.deployTargetMode,
+        isStartCommandCustomized,
+        plugin,
+        slug,
+        mappings
+      )
       return {
         ...prev,
         envVars: updated,
@@ -455,10 +513,16 @@ export function NewProjectWizard({
       updated[index] = { ...updated[index], [field]: val }
       const slug = toSafeSlug(prev.projectName)
       const plugin = getRuntime(prev.runtime) || getAllRuntimes()[0]
-      const updatedStart = plugin.getStartCommand(slug, prev.serverPort, {
-        mode: prev.deployTargetMode,
-        envVars: updated,
-      })
+      const mappings = prev.portMappings && prev.portMappings.length > 0 ? prev.portMappings : prev.serverPort
+      const updatedStart = safeUpdateStartCommandOnEnvChange(
+        prev.startCommand,
+        updated,
+        prev.deployTargetMode,
+        isStartCommandCustomized,
+        plugin,
+        slug,
+        mappings
+      )
       return {
         ...prev,
         envVars: updated,
@@ -485,10 +549,16 @@ export function NewProjectWizard({
       presets.forEach((p) => existingMap.set(p.key, p))
       const merged = Array.from(existingMap.values())
       const slug = toSafeSlug(prev.projectName)
-      const updatedStart = plugin.getStartCommand(slug, prev.serverPort, {
-        mode: prev.deployTargetMode,
-        envVars: merged,
-      })
+      const mappings = prev.portMappings && prev.portMappings.length > 0 ? prev.portMappings : prev.serverPort
+      const updatedStart = safeUpdateStartCommandOnEnvChange(
+        prev.startCommand,
+        merged,
+        prev.deployTargetMode,
+        isStartCommandCustomized,
+        plugin,
+        slug,
+        mappings
+      )
       return {
         ...prev,
         envVars: merged,
@@ -532,17 +602,17 @@ export function NewProjectWizard({
         const validPorts =
           data.deployTargetMode === 'docker'
             ? data.portMappings.length > 0 &&
-              data.portMappings.every(
-                (m) =>
-                  !isNaN(m.host) &&
-                  m.host > 0 &&
-                  m.host <= 65535 &&
-                  !isNaN(m.container) &&
-                  m.container > 0 &&
-                  m.container <= 65535
-              )
+            data.portMappings.every(
+              (m) =>
+                !isNaN(m.host) &&
+                m.host > 0 &&
+                m.host <= 65535 &&
+                !isNaN(m.container) &&
+                m.container > 0 &&
+                m.container <= 65535
+            )
             : data.serverPort.length > 0 &&
-              data.serverPort.every((p) => !isNaN(p) && p > 0 && p <= 65535)
+            data.serverPort.every((p) => !isNaN(p) && p > 0 && p <= 65535)
 
         return (
           data.serverIp.trim().length > 0 &&
@@ -787,11 +857,22 @@ export function NewProjectWizard({
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-xs font-semibold text-muted-foreground">
-                    Git 认证账号 (可选)
-                  </label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-muted-foreground">
+                      Git 认证账号 (可选)
+                    </label>
+                    {detectGitProvider(data.gitUrl) === 'gitlab' && (
+                      <span className="text-[10px] text-amber-500 font-mono">
+                        缺省默认: oauth2
+                      </span>
+                    )}
+                  </div>
                   <Input
-                    placeholder="例如：ci-bot"
+                    placeholder={
+                      detectGitProvider(data.gitUrl) === 'gitlab'
+                        ? '留空自动适配 oauth2'
+                        : '例如：ci-bot (可留空)'
+                    }
                     value={data.gitUsername}
                     onChange={(e) =>
                       setData({ ...data, gitUsername: e.target.value })
@@ -805,14 +886,20 @@ export function NewProjectWizard({
                   </label>
                   <Input
                     type="password"
-                    placeholder="ghp_xxxx 或私有令牌"
+                    placeholder="glpat-xxxx / ghp_xxxx / 私有令牌"
                     value={data.gitToken}
                     onChange={(e) =>
                       setData({ ...data, gitToken: e.target.value })
                     }
-                    className="mt-1 text-sm"
+                    className="mt-1 text-sm font-mono"
                   />
                 </div>
+              </div>
+
+              {/* 智能平台鉴权提示 */}
+              <div className="text-[11px] px-3 py-2 rounded-md bg-muted/40 text-muted-foreground border border-border/60 flex items-start gap-2 leading-relaxed">
+                <span className="text-primary font-medium shrink-0">💡 提示:</span>
+                <span>{getGitAuthHint(data.gitUrl)}</span>
               </div>
             </div>
           )}
@@ -1017,14 +1104,38 @@ export function NewProjectWizard({
                 )}
 
                 <div>
-                  <label className="text-xs font-semibold text-muted-foreground">
-                    启动/重载命令
-                  </label>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs font-semibold text-muted-foreground">
+                        启动/重载命令
+                      </label>
+                      {isStartCommandCustomized && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-500 border border-amber-500/20 font-medium">
+                          已手动自定义
+                        </span>
+                      )}
+                    </div>
+                    {isStartCommandCustomized && (
+                      <button
+                        type="button"
+                        onClick={handleResetStartCommand}
+                        className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        <RotateCcw className="size-3" />
+                        恢复默认命令
+                      </button>
+                    )}
+                  </div>
                   <Input
                     value={data.startCommand}
                     onChange={(e) => handleStartCommandChange(e.target.value)}
                     className="mt-1 font-mono text-xs"
                   />
+                  {isStartCommandCustomized && (
+                    <p className="text-[11px] text-muted-foreground/70 mt-1">
+                      💡 提示：当前命令包含自定义修改，调整端口或环境变量将智能局部同步，不会覆盖您的自定义参数。
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -1062,7 +1173,7 @@ export function NewProjectWizard({
                       <p className="text-foreground font-medium flex items-center gap-1.5">
                         <span className="size-1.5 rounded-full bg-blue-400" />
                         <strong>存放位置指引：</strong>
-                        请在 Git 代码仓库<strong>根目录</strong>下创建名为 <code className="text-blue-400 font-mono font-bold">Dockerfile</code> (无后缀) 的文件并提交。
+                        请在 Git 代码仓库<strong>根目录</strong>下创建名为 <code className="text-blue-400 font-mono font-bold">Dockerfile</code> 的文件并提交。
                       </p>
                       <p className="pl-3 text-muted-foreground">
                         构建流水线执行 <code className="font-mono text-foreground">docker build .</code> 时将自动以此文件为蓝本生成镜像。若仓库根目录下缺少该文件，构建将报错。
@@ -1230,7 +1341,7 @@ export function NewProjectWizard({
                           <strong>目标服务器环境要求：</strong>
                         </p>
                         <p className="pl-3 text-muted-foreground mt-0.5">
-                          {currentPlugin.nativeRequirementDesc || '目标服务器需具备对应语言运行环境与工具依赖。'}在点击【立即部署】时，平台前置探针将自动校验目标主机环境 (需依赖: <code className="text-amber-400 font-mono">{currentPlugin.getRequiredTools('native').join('、') || '基础依赖'}</code>)。
+                          {currentPlugin.nativeRequirementDesc || '目标服务器需具备对应语言运行环境与工具依赖。'}在点击【立即部署】时，平台前置探针将自动校验目标主机环境 (需依赖: <code className="text-amber-400 font-mono">{getCarrierCommandStrategy('native').getRequiredTools(currentPlugin).join('、') || '基础依赖'}</code>)。
                         </p>
                       </div>
 
@@ -1480,11 +1591,10 @@ export function NewProjectWizard({
                         {data.serverPort.map((p, idx) => (
                           <span
                             key={p}
-                            className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${
-                              idx === 0
+                            className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${idx === 0
                                 ? 'bg-primary/10 text-primary border-primary/20 font-medium'
                                 : 'bg-muted text-foreground border-border'
-                            }`}
+                              }`}
                           >
                             :{p} {idx === 0 && <span className="text-[10px] text-primary/70">(主端口)</span>}
                             {data.serverPort.length > 1 && (
@@ -1581,11 +1691,10 @@ export function NewProjectWizard({
                     {data.portMappings.map((m, idx) => (
                       <span
                         key={idx}
-                        className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${
-                          idx === 0
+                        className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${idx === 0
                             ? 'bg-primary/10 text-primary border-primary/20 font-medium'
                             : 'bg-muted text-foreground border-border'
-                        }`}
+                          }`}
                       >
                         -p {m.host}:{m.container} {idx === 0 && <span className="text-[10px] text-primary/70">(主映射)</span>}
                       </span>
@@ -1814,7 +1923,7 @@ export function NewProjectWizard({
                         原生部署就绪提醒
                       </p>
                       <p className="text-muted-foreground text-[11px] mt-0.5">
-                        项目已配置为目标主机原生部署模式。部署时系统将自动检测目标服务器 {currentPlugin.name} 运行环境 ({currentPlugin.getRequiredTools('native').join('、') || '原生依赖'})，并通过 SFTP 上传归档解压运行。
+                        项目已配置为目标主机原生部署模式。部署时系统将自动检测目标服务器 {currentPlugin.name} 运行环境 ({getCarrierCommandStrategy('native').getRequiredTools(currentPlugin).join('、') || '原生依赖'})，并通过 SFTP 上传归档解压运行。
                       </p>
                     </div>
                   </div>

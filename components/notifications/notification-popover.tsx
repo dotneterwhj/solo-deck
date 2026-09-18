@@ -182,7 +182,7 @@ export function NotificationPopover({
         return
       }
       if (onNavigateView) {
-        onNavigateView('list')
+        onNavigateView('projects')
         setIsOpen(false)
         return
       }
@@ -276,11 +276,10 @@ export function NotificationPopover({
           setIsOpen((prev) => !prev)
           if (!isOpen) fetchNotifications(false)
         }}
-        className={`p-2 rounded-lg transition-colors relative ${
-          isOpen
+        className={`p-2 rounded-lg transition-colors relative ${isOpen
             ? 'bg-muted text-foreground'
             : 'hover:bg-muted text-muted-foreground hover:text-foreground'
-        }`}
+          }`}
         title="系统通知"
         aria-label="系统通知"
       >
@@ -362,61 +361,55 @@ export function NotificationPopover({
           <div className="flex items-center gap-1 px-3 py-2 border-b border-border/60 bg-[#12161c] overflow-x-auto scrollbar-none text-[11px]">
             <button
               onClick={() => setActiveTab('all')}
-              className={`px-2.5 py-1 rounded-md transition-colors font-medium shrink-0 ${
-                activeTab === 'all'
+              className={`px-2.5 py-1 rounded-md transition-colors font-medium shrink-0 ${activeTab === 'all'
                   ? 'bg-primary/20 text-primary border border-primary/30'
                   : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-              }`}
+                }`}
             >
               全部 ({notifications.length})
             </button>
             <button
               onClick={() => setActiveTab('unread')}
-              className={`px-2.5 py-1 rounded-md transition-colors font-medium shrink-0 ${
-                activeTab === 'unread'
+              className={`px-2.5 py-1 rounded-md transition-colors font-medium shrink-0 ${activeTab === 'unread'
                   ? 'bg-primary/20 text-primary border border-primary/30'
                   : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-              }`}
+                }`}
             >
               未读 ({unreadCount})
             </button>
             <button
               onClick={() => setActiveTab('deployment')}
-              className={`px-2.5 py-1 rounded-md transition-colors font-medium shrink-0 ${
-                activeTab === 'deployment'
+              className={`px-2.5 py-1 rounded-md transition-colors font-medium shrink-0 ${activeTab === 'deployment'
                   ? 'bg-primary/20 text-primary border border-primary/30'
                   : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-              }`}
+                }`}
             >
               部署
             </button>
             <button
               onClick={() => setActiveTab('health_check')}
-              className={`px-2.5 py-1 rounded-md transition-colors font-medium shrink-0 ${
-                activeTab === 'health_check'
+              className={`px-2.5 py-1 rounded-md transition-colors font-medium shrink-0 ${activeTab === 'health_check'
                   ? 'bg-primary/20 text-primary border border-primary/30'
                   : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-              }`}
+                }`}
             >
               心跳探针
             </button>
             <button
               onClick={() => setActiveTab('server')}
-              className={`px-2.5 py-1 rounded-md transition-colors font-medium shrink-0 ${
-                activeTab === 'server'
+              className={`px-2.5 py-1 rounded-md transition-colors font-medium shrink-0 ${activeTab === 'server'
                   ? 'bg-primary/20 text-primary border border-primary/30'
                   : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-              }`}
+                }`}
             >
               主机节点
             </button>
             <button
               onClick={() => setActiveTab('cleanup')}
-              className={`px-2.5 py-1 rounded-md transition-colors font-medium shrink-0 ${
-                activeTab === 'cleanup'
+              className={`px-2.5 py-1 rounded-md transition-colors font-medium shrink-0 ${activeTab === 'cleanup'
                   ? 'bg-primary/20 text-primary border border-primary/30'
                   : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-              }`}
+                }`}
             >
               清理
             </button>
@@ -441,11 +434,10 @@ export function NotificationPopover({
                   <div
                     key={item.id}
                     onClick={() => handleItemClick(item)}
-                    className={`group relative p-3 transition-colors cursor-pointer flex gap-3 ${
-                      isUnread
+                    className={`group relative p-3 transition-colors cursor-pointer flex gap-3 ${isUnread
                         ? 'bg-primary/5 hover:bg-primary/10 border-l-2 border-primary'
                         : 'hover:bg-muted/40 border-l-2 border-transparent'
-                    }`}
+                      }`}
                   >
                     {/* Left Icon */}
                     <div className="mt-0.5">{renderIcon(item)}</div>
@@ -454,9 +446,8 @@ export function NotificationPopover({
                     <div className="flex-1 min-w-0 pr-6">
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <span
-                          className={`text-xs font-semibold leading-tight line-clamp-1 ${
-                            isUnread ? 'text-foreground' : 'text-foreground/80'
-                          }`}
+                          className={`text-xs font-semibold leading-tight line-clamp-1 ${isUnread ? 'text-foreground' : 'text-foreground/80'
+                            }`}
                         >
                           {item.title}
                         </span>

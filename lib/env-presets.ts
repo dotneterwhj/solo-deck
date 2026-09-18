@@ -175,11 +175,15 @@ fi`,
   },
 ]
 
-import { getRequiredEnvKeysForRuntime } from './runtimes'
+import { getCarrierCommandStrategy } from './carriers/command-strategy'
+import { getRuntime } from './runtimes'
+import { DeployTargetMode } from './types'
 
 /**
- * 根据项目运行时类型匹配其前置依赖项（在 Docker 容器化交付体系下，统一由运行时抽象层声明）
+ * 根据项目运行时类型与部署载体模式匹配其前置依赖项 (由载体策略多态声明)
  */
-export function getRequiredEnvKeys(runtime: string, mode: 'docker' | 'native' = 'docker'): string[] {
-  return getRequiredEnvKeysForRuntime(runtime, mode)
+export function getRequiredEnvKeys(runtime: string, mode: DeployTargetMode = 'docker'): string[] {
+  const plugin = getRuntime(runtime)
+  const strategy = getCarrierCommandStrategy(mode)
+  return strategy.getRequiredTools(plugin)
 }

@@ -218,7 +218,7 @@ export default function Page() {
   const handleProjectCreated = (newProject: Project) => {
     setShowNewProjectWizard(false)
     setProjects((prev) => [newProject, ...prev])
-    setView('list')
+    setView('projects')
   }
 
   if (authChecking) {
@@ -251,7 +251,7 @@ export default function Page() {
           if (p) {
             setActiveDetailProject(p)
           } else {
-            setView('list')
+            setView('projects')
           }
         }}
       >
@@ -268,7 +268,7 @@ export default function Page() {
           />
         )}
 
-        {view === 'list' && (
+        {view === 'projects' && (
           <div className="space-y-4">
             <ProjectList
               projects={projects}

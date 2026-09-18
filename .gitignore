@@ -27,3 +27,4 @@ pnpm-debug.log*
 
 # Data files
 data/db.json
+build.tar.gz

@@ -30,7 +30,7 @@ export class StaticWebRuntimePlugin extends BaseRuntimePlugin {
 # ===================================================
 
 # 阶段 1: 前端静态资源打包
-FROM node:20-alpine AS builder
+FROM node:24-alpine AS builder
 WORKDIR /app
 
 COPY package*.json pnpm-lock.yaml* yarn.lock* ./

@@ -13,7 +13,7 @@ import {
   LogOut,
 } from 'lucide-react'
 
-export type ViewType = 'dashboard' | 'list' | 'servers' | 'settings'
+export type ViewType = 'dashboard' | 'projects' | 'servers' | 'settings'
 
 interface SidebarProps {
   currentView: ViewType
@@ -33,7 +33,7 @@ export function Sidebar({ currentView, onViewChange, onOpenHelp, currentUser, on
       icon: LayoutDashboard,
     },
     {
-      id: 'list' as ViewType,
+      id: 'projects' as ViewType,
       label: '项目列表',
       icon: Package,
     },

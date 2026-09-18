@@ -1,31 +1,17 @@
 import { BaseRuntimePlugin, toSafeSlug } from '../base'
-import { RuntimeEnvVarPreset, DeployTargetMode, PortMapping } from '../types'
+import { RuntimeEnvVarPreset, PortMapping } from '../types'
 
 export class NodeJSRuntimePlugin extends BaseRuntimePlugin {
-  override getStartCommand(
-    projectName?: string,
-    port?: number | number[] | PortMapping[],
-    options?: {
-      mode?: DeployTargetMode
-      versionTag?: string
-      envVars?: { key: string; value: string }[]
-      containerPort?: number | number[]
-      portMappings?: PortMapping[]
-    }
-  ): string {
-    const mode = options?.mode || 'docker'
-    if (mode === 'native') {
-      const slug = toSafeSlug(projectName)
-      return `pm2 reload ${slug} || pm2 start npm --name "${slug}" -- start`
-    }
-    return super.getStartCommand(projectName, port, options)
+  override getNativeStartCommand(projectName?: string, _port?: number | number[] | PortMapping[]): string {
+    const slug = toSafeSlug(projectName)
+    return `pm2 reload ${slug} || pm2 start npm --name "${slug}" -- start`
   }
   readonly id = 'nodejs'
   readonly name = 'Node.js'
   readonly category = 'Node.js'
   readonly description = '适用于 Next.js, Express, NestJS, Koa, Vite SSR 等全栈或服务端应用，采用多阶段构建与最小化运行镜像。'
   readonly defaultPort = 3000
-  readonly baseImage = 'node:20-alpine'
+  readonly baseImage = 'node:24-alpine'
   readonly defaultNativeInstallCmd = 'npm install'
   readonly defaultNativeBuildCmd = 'npm run build'
   readonly defaultNativeStartCmd = 'npm run start'
@@ -33,7 +19,7 @@ export class NodeJSRuntimePlugin extends BaseRuntimePlugin {
   override readonly nativeProcessManager = 'PM2 / Node.js 托管'
   override readonly nativeRequirementDesc = '目标服务器需安装 Node.js (>= 18) 与 PM2 (推荐通过全局 npm install -g pm2 安装)。'
   readonly keyFeatures = [
-    '多阶段构建 (Multi-stage build) + Standalone 依赖追踪 (镜像体积从 800MB 骤降至 ~100MB)',
+    '多阶段构建 (Multi-stage build) + Standalone 依赖追踪',
     '依赖层缓存加速，优先利用 package*.json 缓存层避免重复安装',
     '非 root 运行用户 (nextjs 安全加固)',
     '绑定 0.0.0.0 与默认 3000 端口，开箱即用',
@@ -47,12 +33,12 @@ export class NodeJSRuntimePlugin extends BaseRuntimePlugin {
   readonly dockerfileTemplate = `# ===================================================
 # Node.js (Next.js Standalone 极致轻量生产模板)
 # 适用: Next.js 13 / 14 / 15+ (需在 next.config 中开启 output: 'standalone')
-# 特性: 镜像体积由 800MB+ 极致瘦身至 ~100MB，跳过庞大 node_modules
+# 特性: 跳过庞大 node_modules
 # 放置路径: 代码仓库根目录 / Dockerfile (与 package.json 同级)
 # ===================================================
 
 # 阶段 1: 依赖安装层 (利用 Docker 缓存加速)
-FROM node:20-alpine AS deps
+FROM node:24-alpine AS deps
 RUN apk add --no-cache libc6-compat
 WORKDIR /app
 
@@ -71,7 +57,7 @@ RUN \\
   fi
 
 # 阶段 2: 应用打包编译
-FROM node:20-alpine AS builder
+FROM node:24-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -86,7 +72,7 @@ RUN mkdir -p /app/public
 RUN npm run build --if-present
 
 # 阶段 3: 极简生产运行镜像 (仅 ~100MB)
-FROM node:20-alpine AS runner
+FROM node:24-alpine AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production \\
@@ -107,10 +93,10 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 USER nextjs
 
-# 暴露服务端口 (需与 CDPipeline 部署配置的端口保持一致)
+# 暴露服务端口 (需与 Solo Deck 部署配置的端口保持一致)
 EXPOSE 3000
 
-# Standalone 模式使用 node server.js 启动 (彻底摆脱数百 MB 的 node_modules 与 npm start)
+# Standalone 模式使用 node server.js 启动
 CMD ["node", "server.js"]
 
 # ---------------------------------------------------------------

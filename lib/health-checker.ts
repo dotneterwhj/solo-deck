@@ -117,7 +117,7 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
       method: 'GET',
       signal: controller.signal,
       headers: {
-        'User-Agent': 'CDPipeline-HealthProbe/1.0',
+        'User-Agent': 'SoloDeck-HealthProbe/1.0',
         Accept: '*/*',
       },
     })

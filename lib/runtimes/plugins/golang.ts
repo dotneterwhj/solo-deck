@@ -1,22 +1,9 @@
 import { BaseRuntimePlugin } from '../base'
-import { RuntimeEnvVarPreset, DeployTargetMode, PortMapping } from '../types'
+import { RuntimeEnvVarPreset, PortMapping } from '../types'
 export class GolangRuntimePlugin extends BaseRuntimePlugin {
-  override getStartCommand(
-    projectName?: string,
-    port?: number | number[] | PortMapping[],
-    options?: {
-      mode?: DeployTargetMode
-      versionTag?: string
-      envVars?: { key: string; value: string }[]
-      containerPort?: number | number[]
-      portMappings?: PortMapping[]
-    }
-  ): string {
-    if (options?.mode === 'native') {
-      const p = this.extractNativePort(port)
-      return `PORT=${p} ./server`
-    }
-    return super.getStartCommand(projectName, port, options)
+  override getNativeStartCommand(_projectName?: string, port?: number | number[] | PortMapping[]): string {
+    const p = this.extractNativePort(port)
+    return `PORT=${p} ./server`
   }
 
   readonly id = 'golang'

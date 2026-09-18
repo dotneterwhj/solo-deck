@@ -157,21 +157,24 @@ export function DashboardOverview({
             <span className="text-xs text-muted-foreground">实时同步流水线事件</span>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {recentDeployments.slice(0, 3).map((dep) => (
               <div
                 key={dep.id}
                 onClick={() => onOpenDeploymentLog(dep.id)}
                 className="p-3 rounded-lg bg-muted/40 border border-border/60 hover:border-primary/50 cursor-pointer transition-colors space-y-1.5"
               >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="font-semibold text-xs text-foreground truncate">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                    <span
+                      className="font-semibold text-xs text-foreground truncate shrink min-w-0"
+                      title={dep.projectName}
+                    >
                       {dep.projectName}
                     </span>
                     {dep.versionTag && (
                       <span
-                        className="inline-flex items-center gap-0.5 text-[10px] font-mono px-1 py-0.2 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 truncate max-w-[120px]"
+                        className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/25 shrink-0 font-medium whitespace-nowrap"
                         title={`镜像版本: ${dep.versionTag}`}
                       >
                         <Tag className="size-2.5 shrink-0" />
@@ -180,14 +183,14 @@ export function DashboardOverview({
                     )}
                   </div>
                   <span
-                    className={`px-1.5 py-0.2 rounded text-[10px] font-semibold ${
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 whitespace-nowrap ${
                       dep.status === 'success'
-                        ? 'bg-green-500/10 text-green-500'
+                        ? 'bg-green-500/10 text-green-500 border border-green-500/20'
                         : dep.status === 'running'
-                          ? 'bg-cyan-500/10 text-cyan-500 animate-pulse'
+                          ? 'bg-cyan-500/10 text-cyan-500 border border-cyan-500/20 animate-pulse'
                           : dep.status === 'cancelled'
-                            ? 'bg-yellow-500/10 text-yellow-500'
-                            : 'bg-red-500/10 text-red-500'
+                            ? 'bg-yellow-500/10 text-yellow-500 border border-yellow-500/20'
+                            : 'bg-red-500/10 text-red-500 border border-red-500/20'
                     }`}
                   >
                     {dep.status === 'success'
@@ -199,7 +202,10 @@ export function DashboardOverview({
                           : '失败'}
                   </span>
                 </div>
-                <p className="text-[11px] text-muted-foreground font-mono truncate">
+                <p
+                  className="text-[11px] text-muted-foreground font-mono truncate"
+                  title={dep.commitMessage || dep.commitHash || '常规更新'}
+                >
                   {dep.commitMessage || dep.commitHash || '常规更新'}
                 </p>
                 <div className="flex items-center justify-between text-[10px] text-muted-foreground pt-1">

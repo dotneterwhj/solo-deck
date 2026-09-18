@@ -30,3 +30,6 @@ export * from './guides/help-modal'
 // Notifications
 export * from './notifications/notification-popover'
 
+// Themes & Appearance
+export * from './theme/theme-switcher'
+

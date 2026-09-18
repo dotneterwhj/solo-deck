@@ -4,6 +4,7 @@ import { Sidebar, ViewType } from './sidebar'
 import { Button } from '@/components/ui/button'
 import { Plus, User, Server, LogOut } from 'lucide-react'
 import { NotificationPopover } from '@/components/notifications/notification-popover'
+import { ThemeSwitcher } from '@/components/theme/theme-switcher'
 
 interface DashboardProps {
   view: ViewType
@@ -35,7 +36,7 @@ export function Dashboard({
           title: '监控总览',
           desc: '实时大盘、交付指标与集群健康状态一览',
         }
-      case 'list':
+      case 'projects':
         return {
           title: '项目流水线列表',
           desc: '管理托管的全部应用构建与自动化发布项目',
@@ -81,7 +82,7 @@ export function Dashboard({
             </div>
 
             <div className="flex items-center gap-3">
-              {(view === 'dashboard' || view === 'list') && (
+              {(view === 'dashboard' || view === 'projects') && (
                 <Button
                   onClick={onCreateProject}
                   size="sm"
@@ -91,6 +92,8 @@ export function Dashboard({
                   新建项目流水线
                 </Button>
               )}
+
+              <ThemeSwitcher />
 
               <NotificationPopover
                 onNavigateView={onViewChange}

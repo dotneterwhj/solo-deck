@@ -131,7 +131,7 @@ const SEED_PROJECTS: Project[] = [
     deployPath: '/opt/apps/api-service',
     installCommand: 'npm install',
     buildCommand: 'docker build -t api-service:latest .',
-    startCommand: 'docker run -d --name api-service -p 3000:3000 --restart=always api-service:latest',
+    startCommand: 'docker run -d --restart unless-stopped --name api-service -p 3000:3000 api-service:latest',
     healthCheckUrl: 'http://192.168.1.100:3000/health',
     runnerMode: 'simulation',
     envVars: [
@@ -163,7 +163,7 @@ const SEED_PROJECTS: Project[] = [
     deployPath: '/opt/apps/data-engine',
     installCommand: 'pip install -r requirements.txt',
     buildCommand: 'docker build -t data-engine:latest .',
-    startCommand: 'docker run -d --name data-engine -p 5000:5000 --restart=always data-engine:latest',
+    startCommand: 'docker run -d --restart unless-stopped --name data-engine -p 5000:5000 data-engine:latest',
     healthCheckUrl: 'http://192.168.1.101:5000/status',
     runnerMode: 'simulation',
     envVars: [
@@ -194,7 +194,7 @@ const SEED_PROJECTS: Project[] = [
     deployPath: '/opt/apps/admin-panel',
     installCommand: 'dotnet restore',
     buildCommand: 'docker build -t admin-panel:latest .',
-    startCommand: 'docker run -d --name admin-panel -p 8080:8080 --restart=always admin-panel:latest',
+    startCommand: 'docker run -d --restart unless-stopped --name admin-panel -p 8080:8080 admin-panel:latest',
     healthCheckUrl: 'http://192.168.1.102:8080/api/health',
     runnerMode: 'simulation',
     envVars: [
@@ -229,7 +229,7 @@ const SEED_PROJECTS: Project[] = [
     deployPath: '/opt/apps/user-service',
     installCommand: 'pnpm install',
     buildCommand: 'docker build -t user-service:latest .',
-    startCommand: 'docker run -d --name user-service -p 3001:3001 --restart=always user-service:latest',
+    startCommand: 'docker run -d --restart unless-stopped --name user-service -p 3001:3001 user-service:latest',
     healthCheckUrl: 'http://192.168.1.103:3001/health',
     runnerMode: 'simulation',
     envVars: [
@@ -639,6 +639,24 @@ export function deleteProject(id: string): boolean {
   return false
 }
 
+export function reorderProjects(orderedIds: string[]): Project[] {
+  const db = readDb()
+  const map = new Map<string, Project>()
+  db.projects.forEach((p) => map.set(p.id, p))
+  const newProjects: Project[] = []
+  orderedIds.forEach((id) => {
+    const p = map.get(id)
+    if (p) {
+      newProjects.push(p)
+      map.delete(id)
+    }
+  })
+  map.forEach((p) => newProjects.push(p))
+  db.projects = newProjects
+  writeDb(db)
+  return getProjects()
+}
+
 // ---------------- Deployment operations ----------------
 export function getDeployments(projectId?: string): Deployment[] {
   const db = readDb()
@@ -762,6 +780,33 @@ export function deleteServer(id: string): boolean {
     return true
   }
   return false
+}
+
+export function reorderServers(orderedIdsOrNames: string[]): ServerNode[] {
+  const db = readDb()
+  const map = new Map<string, ServerNode>()
+  db.servers.forEach((s) => {
+    map.set(s.id, s)
+    map.set(s.name, s)
+  })
+  const newServers: ServerNode[] = []
+  const addedIds = new Set<string>()
+  orderedIdsOrNames.forEach((key) => {
+    const s = map.get(key)
+    if (s && !addedIds.has(s.id)) {
+      newServers.push(s)
+      addedIds.add(s.id)
+    }
+  })
+  db.servers.forEach((s) => {
+    if (!addedIds.has(s.id)) {
+      newServers.push(s)
+      addedIds.add(s.id)
+    }
+  })
+  db.servers = newServers
+  writeDb(db)
+  return getServers()
 }
 
 // ---------------- Settings operations ----------------

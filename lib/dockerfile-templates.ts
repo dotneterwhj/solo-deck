@@ -6,7 +6,7 @@ export const DOCKERFILE_TEMPLATES: DockerfileTemplate[] = getDockerfileTemplates
 
 export const DOCKER_PLACEMENT_GUIDELINES = {
   title: 'Docker 容器化部署操作指南',
-  summary: 'CDPipeline 采用标准 Docker 构建机制。为确保流水线能顺利完成构建，请遵循以下规范将 Dockerfile 放入项目中：',
+  summary: 'Solo Deck 采用标准 Docker 构建机制。为确保流水线能顺利完成构建，请遵循以下规范将 Dockerfile 放入项目中：',
   steps: [
     {
       step: 1,

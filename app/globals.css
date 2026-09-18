@@ -45,119 +45,223 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-:root {
-  color-scheme: light;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
-}
+/* ==========================================================================
+   全局主题 Tokens 配置 (支持一键无感换肤，更改样式无需修改组件代码)
+   ========================================================================== */
 
-.dark {
+/* 1. 默认主题：钛金工矿 (Titanium Amber / Default) - 工业冷灰与航天安全金 */
+:root,
+:root[data-theme="titanium"],
+.dark,
+.dark[data-theme="titanium"] {
   color-scheme: dark;
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --background: oklch(0.20 0.015 255);
+  --foreground: oklch(0.98 0 0);
+  --card: oklch(0.26 0.02 255);
+  --card-foreground: oklch(0.98 0 0);
+  --popover: oklch(0.26 0.02 255);
+  --popover-foreground: oklch(0.98 0 0);
+  --primary: oklch(0.78 0.18 65);
+  --primary-foreground: oklch(0.13 0.02 255);
+  --secondary: oklch(0.30 0.02 255);
+  --secondary-foreground: oklch(0.98 0 0);
+  --muted: oklch(0.27 0.018 255);
+  --muted-foreground: oklch(0.72 0.01 255);
+  --accent: oklch(0.30 0.02 255);
+  --accent-foreground: oklch(0.98 0 0);
+  --destructive: oklch(0.65 0.22 25);
+  --border: oklch(0.46 0.02 255 / 40%);
+  --input: oklch(0.42 0.02 255 / 50%);
+  --ring: oklch(0.78 0.18 65 / 50%);
+  --sidebar: oklch(0.23 0.022 255);
+  --sidebar-foreground: oklch(0.98 0 0);
+  --sidebar-primary: oklch(0.78 0.18 65);
+  --sidebar-primary-foreground: oklch(0.13 0.02 255);
+  --sidebar-accent: oklch(0.30 0.025 255);
+  --sidebar-accent-foreground: oklch(0.98 0 0);
+  --sidebar-border: oklch(0.48 0.025 255 / 45%);
+  --sidebar-ring: oklch(0.78 0.18 65);
+  --radius: 0.625rem;
+  --bg-pattern: radial-gradient(ellipse 80% 55% at 50% -20%, oklch(0.42 0.10 65 / 22%), transparent 70%);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root:not(.light) {
-    color-scheme: dark;
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
-  }
+/* 2. 极客暗黑 (Dark Geek) - 纯粹黑曜石极客沉浸 */
+:root[data-theme="dark"],
+.dark[data-theme="dark"] {
+  color-scheme: dark;
+  --background: oklch(0.12 0.006 260);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.16 0.008 260);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.16 0.008 260);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.72 0.17 160);
+  --primary-foreground: oklch(0.11 0 0);
+  --secondary: oklch(0.22 0.01 260);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.20 0.01 260);
+  --muted-foreground: oklch(0.70 0.01 260);
+  --accent: oklch(0.22 0.01 260);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.65 0.22 25);
+  --border: oklch(0.32 0.01 260 / 40%);
+  --input: oklch(0.32 0.01 260 / 50%);
+  --ring: oklch(0.72 0.17 160 / 40%);
+  --sidebar: oklch(0.13 0.008 260);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.72 0.17 160);
+  --sidebar-primary-foreground: oklch(0.11 0 0);
+  --sidebar-accent: oklch(0.20 0.01 260);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(0.32 0.01 260 / 40%);
+  --sidebar-ring: oklch(0.72 0.17 160);
+  --bg-pattern: radial-gradient(ellipse 80% 50% at 50% -20%, oklch(0.32 0.06 160 / 18%), transparent 70%);
+}
+
+/* 3. 星际极夜蓝 (Midnight Navy) - 深邃蔚蓝深空星海 */
+:root[data-theme="midnight"],
+.dark[data-theme="midnight"] {
+  color-scheme: dark;
+  --background: oklch(0.16 0.07 250);
+  --foreground: oklch(0.98 0.01 240);
+  --card: oklch(0.22 0.08 250);
+  --card-foreground: oklch(0.98 0.01 240);
+  --popover: oklch(0.22 0.08 250);
+  --popover-foreground: oklch(0.98 0.01 240);
+  --primary: oklch(0.78 0.18 215);
+  --primary-foreground: oklch(0.12 0.06 250);
+  --secondary: oklch(0.26 0.075 250);
+  --secondary-foreground: oklch(0.98 0.01 240);
+  --muted: oklch(0.24 0.07 250);
+  --muted-foreground: oklch(0.74 0.04 240);
+  --accent: oklch(0.26 0.075 250);
+  --accent-foreground: oklch(0.98 0.01 240);
+  --destructive: oklch(0.65 0.22 25);
+  --border: oklch(0.42 0.09 250 / 40%);
+  --input: oklch(0.38 0.08 250 / 50%);
+  --ring: oklch(0.78 0.18 215 / 50%);
+  --sidebar: oklch(0.19 0.085 250);
+  --sidebar-foreground: oklch(0.98 0.01 240);
+  --sidebar-primary: oklch(0.78 0.18 215);
+  --sidebar-primary-foreground: oklch(0.12 0.06 250);
+  --sidebar-accent: oklch(0.27 0.09 250);
+  --sidebar-accent-foreground: oklch(0.98 0.01 240);
+  --sidebar-border: oklch(0.45 0.10 250 / 45%);
+  --sidebar-ring: oklch(0.78 0.18 215);
+  --bg-pattern: radial-gradient(ellipse 80% 55% at 50% -20%, oklch(0.45 0.18 235 / 35%), transparent 70%);
+}
+
+/* 4. 极光秘境 (Aurora Emerald) - 暗夜冷萃翡翠绿 */
+:root[data-theme="aurora"],
+.dark[data-theme="aurora"] {
+  color-scheme: dark;
+  --background: oklch(0.15 0.06 165);
+  --foreground: oklch(0.98 0.01 160);
+  --card: oklch(0.21 0.07 165);
+  --card-foreground: oklch(0.98 0.01 160);
+  --popover: oklch(0.21 0.07 165);
+  --popover-foreground: oklch(0.98 0.01 160);
+  --primary: oklch(0.82 0.22 155);
+  --primary-foreground: oklch(0.11 0.06 165);
+  --secondary: oklch(0.25 0.065 165);
+  --secondary-foreground: oklch(0.98 0.01 160);
+  --muted: oklch(0.23 0.06 165);
+  --muted-foreground: oklch(0.74 0.04 165);
+  --accent: oklch(0.25 0.065 165);
+  --accent-foreground: oklch(0.98 0.01 160);
+  --destructive: oklch(0.65 0.22 25);
+  --border: oklch(0.42 0.08 165 / 40%);
+  --input: oklch(0.38 0.08 165 / 50%);
+  --ring: oklch(0.82 0.22 155 / 50%);
+  --sidebar: oklch(0.19 0.075 165);
+  --sidebar-foreground: oklch(0.98 0.01 160);
+  --sidebar-primary: oklch(0.82 0.22 155);
+  --sidebar-primary-foreground: oklch(0.11 0.06 165);
+  --sidebar-accent: oklch(0.26 0.08 165);
+  --sidebar-accent-foreground: oklch(0.98 0.01 160);
+  --sidebar-border: oklch(0.45 0.09 165 / 45%);
+  --sidebar-ring: oklch(0.82 0.22 155);
+  --bg-pattern: radial-gradient(ellipse 80% 55% at 50% -20%, oklch(0.45 0.16 160 / 32%), transparent 70%);
+}
+
+/* 5. 赛博深霓 (Cyberpunk Purple) - 霓虹幻紫与品红 */
+:root[data-theme="cyberpunk"],
+.dark[data-theme="cyberpunk"] {
+  color-scheme: dark;
+  --background: oklch(0.15 0.07 305);
+  --foreground: oklch(0.98 0.01 305);
+  --card: oklch(0.21 0.085 305);
+  --card-foreground: oklch(0.98 0.01 305);
+  --popover: oklch(0.21 0.085 305);
+  --popover-foreground: oklch(0.98 0.01 305);
+  --primary: oklch(0.74 0.25 325);
+  --primary-foreground: oklch(0.12 0.06 305);
+  --secondary: oklch(0.26 0.08 305);
+  --secondary-foreground: oklch(0.98 0.01 305);
+  --muted: oklch(0.23 0.07 305);
+  --muted-foreground: oklch(0.74 0.04 305);
+  --accent: oklch(0.26 0.08 305);
+  --accent-foreground: oklch(0.98 0.01 305);
+  --destructive: oklch(0.65 0.22 25);
+  --border: oklch(0.44 0.13 305 / 40%);
+  --input: oklch(0.40 0.11 305 / 50%);
+  --ring: oklch(0.74 0.25 325 / 50%);
+  --sidebar: oklch(0.19 0.09 305);
+  --sidebar-foreground: oklch(0.98 0.01 305);
+  --sidebar-primary: oklch(0.74 0.25 325);
+  --sidebar-primary-foreground: oklch(0.12 0.06 305);
+  --sidebar-accent: oklch(0.27 0.10 305);
+  --sidebar-accent-foreground: oklch(0.98 0.01 305);
+  --sidebar-border: oklch(0.48 0.15 305 / 45%);
+  --sidebar-ring: oklch(0.74 0.25 325);
+  --bg-pattern: radial-gradient(ellipse 80% 55% at 50% -20%, oklch(0.48 0.20 315 / 35%), transparent 70%);
+}
+
+/* 6. 纯净白昼 (Pure Light) - 清爽日间高对比明朗 */
+:root[data-theme="light"],
+.light,
+.light[data-theme="light"] {
+  color-scheme: light;
+  --background: oklch(0.96 0.01 245);
+  --foreground: oklch(0.16 0.02 250);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.16 0.02 250);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.16 0.02 250);
+  --primary: oklch(0.52 0.22 250);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.93 0.015 245);
+  --secondary-foreground: oklch(0.2 0.02 250);
+  --muted: oklch(0.93 0.015 245);
+  --muted-foreground: oklch(0.48 0.02 250);
+  --accent: oklch(0.93 0.015 245);
+  --accent-foreground: oklch(0.16 0.02 250);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.88 0.015 245);
+  --input: oklch(0.88 0.015 245);
+  --ring: oklch(0.52 0.22 250 / 40%);
+  --sidebar: oklch(0.98 0.005 245);
+  --sidebar-foreground: oklch(0.16 0.02 250);
+  --sidebar-primary: oklch(0.52 0.22 250);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent: oklch(0.92 0.015 245);
+  --sidebar-accent-foreground: oklch(0.16 0.02 250);
+  --sidebar-border: oklch(0.88 0.015 245);
+  --sidebar-ring: oklch(0.52 0.22 250);
+  --bg-pattern: radial-gradient(ellipse 80% 50% at 50% -20%, oklch(0.92 0.04 240 / 40%), transparent 70%);
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
-  body {
-    @apply bg-background text-foreground;
+  body,
+  .bg-background {
+    background-image: var(--bg-pattern);
+    background-attachment: fixed;
+    background-size: cover;
+  }
+  aside.bg-sidebar {
+    background-image: radial-gradient(circle at 50% 0%, var(--primary) / 8%, transparent 50%);
   }
 }

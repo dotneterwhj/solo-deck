@@ -1,24 +1,11 @@
 import { BaseRuntimePlugin, toSafeSlug } from '../base'
-import { RuntimeEnvVarPreset, DockerBuildArgDefinition, DeployTargetMode, PortMapping } from '../types'
+import { RuntimeEnvVarPreset, DockerBuildArgDefinition, PortMapping } from '../types'
 
 export class DotnetRuntimePlugin extends BaseRuntimePlugin {
-  override getStartCommand(
-    projectName?: string,
-    port?: number | number[] | PortMapping[],
-    options?: {
-      mode?: DeployTargetMode
-      versionTag?: string
-      envVars?: { key: string; value: string }[]
-      containerPort?: number | number[]
-      portMappings?: PortMapping[]
-    }
-  ): string {
-    if (options?.mode === 'native') {
-      const p = this.extractNativePort(port)
-      const slug = projectName ? toSafeSlug(projectName) : 'app'
-      return `ASPNETCORE_URLS=http://0.0.0.0:${p} dotnet ./publish/${slug}.dll || ASPNETCORE_URLS=http://0.0.0.0:${p} dotnet ./publish/app.dll || dotnet ./publish/*.dll`
-    }
-    return super.getStartCommand(projectName, port, options)
+  override getNativeStartCommand(projectName?: string, port?: number | number[] | PortMapping[]): string {
+    const p = this.extractNativePort(port)
+    const slug = projectName ? toSafeSlug(projectName) : 'app'
+    return `ASPNETCORE_URLS=http://0.0.0.0:${p} dotnet ./publish/${slug}.dll || ASPNETCORE_URLS=http://0.0.0.0:${p} dotnet ./publish/app.dll || dotnet ./publish/*.dll`
   }
 
   readonly id = 'dotnet'

@@ -19,12 +19,16 @@ import {
   Trash2,
   RefreshCw,
   AlertCircle,
+  Palette,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { SystemSettings as SettingsType, DockerRegistryConfig } from '@/lib/types'
+import { useTheme } from '@/lib/theme/theme-context'
+import { THEMES } from '@/lib/theme/types'
 
 export function SystemSettings() {
+  const { theme, setTheme } = useTheme()
   const [settings, setSettings] = useState<SettingsType>({
     platformName: 'Solo Deck 平台',
     workspacePath: '',
@@ -246,6 +250,71 @@ export function SystemSettings() {
               placeholder=".cicd_artifacts"
             />
           </div>
+        </div>
+      </div>
+
+      {/* Theme & Appearance */}
+      <div className="rounded-xl border border-border bg-card p-5 space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-bold text-foreground flex items-center gap-2">
+            <Palette className="size-4 text-primary" />
+            外观与主题风格 (Appearance & Themes)
+          </h3>
+          <span className="text-[11px] text-muted-foreground bg-secondary/60 px-2 py-0.5 rounded border border-border/80">
+            CSS Design Tokens 纯变量驱动 · 无需改动业务组件
+          </span>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          全局采用现代化 OKLCH 色彩空间与语义化设计令牌，主题实时切换并持久化存储至浏览器。新增或定制主题仅需扩展 CSS 变量，底层业务组件零侵入。
+        </p>
+
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 pt-1">
+          {THEMES.map((t) => {
+            const isSelected = theme === t.id
+            return (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setTheme(t.id)}
+                className={`relative flex flex-col p-3 rounded-xl border text-left transition-all group ${
+                  isSelected
+                    ? 'border-primary ring-2 ring-primary/20 bg-primary/5 shadow-xs'
+                    : 'border-border bg-card/60 hover:border-primary/40 hover:bg-card'
+                }`}
+              >
+                {/* Visual preview swatch */}
+                <div
+                  className="w-full h-12 rounded-lg border border-white/10 p-1.5 flex flex-col justify-between mb-2 relative overflow-hidden shadow-inner"
+                  style={{ backgroundColor: t.preview.bg }}
+                >
+                  <div className="flex items-center justify-between">
+                    <div
+                      className="size-3.5 rounded-full"
+                      style={{ backgroundColor: t.preview.primary }}
+                    />
+                    <div
+                      className="h-1.5 w-6 rounded-full opacity-60"
+                      style={{ backgroundColor: t.preview.border }}
+                    />
+                  </div>
+                  <div
+                    className="h-3 rounded-md w-full opacity-80"
+                    style={{ backgroundColor: t.preview.card }}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between w-full">
+                  <span className="text-xs font-semibold text-foreground truncate">{t.name}</span>
+                  {isSelected && (
+                    <span className="size-2 rounded-full bg-primary ring-2 ring-primary/30 shrink-0 ml-1" />
+                  )}
+                </div>
+                <span className="text-[10px] text-muted-foreground mt-0.5 line-clamp-1">
+                  {t.description}
+                </span>
+              </button>
+            )
+          })}
         </div>
       </div>
 

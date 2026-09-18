@@ -117,7 +117,7 @@ export function HelpModal({ onClose }: HelpModalProps) {
                 </button>
               </div>
               <p>
-                采用 Docker 模式部署时，系统在仓库根目录执行 <code className="text-blue-400 font-mono">docker build .</code>。请务必将名为 <code className="text-blue-400 font-mono">Dockerfile</code>（无后缀）的文件存放在 Git 代码仓库根目录下并提交。平台支持多语言模板及 .dockerignore 优化方案。
+                采用 Docker 模式部署时，系统在仓库根目录执行 <code className="text-blue-400 font-mono">docker build .</code>。请务必将名为 <code className="text-blue-400 font-mono">Dockerfile</code> 的文件存放在 Git 代码仓库根目录下并提交。平台支持多语言模板及 .dockerignore 优化方案。
               </p>
             </div>
           </div>

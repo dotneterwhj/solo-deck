@@ -6,6 +6,7 @@ import { JavaRuntimePlugin } from './plugins/java'
 import { DotnetRuntimePlugin } from './plugins/dotnet'
 import { StaticWebRuntimePlugin } from './plugins/static'
 import { IRuntimePlugin, DeployTargetMode } from './types'
+import { getCarrierCommandStrategy } from '../carriers/command-strategy'
 
 // 初始化注册预置的多语言运行时插件 (Docker 为部署载体，非语言运行时)
 runtimeRegistry
@@ -51,10 +52,8 @@ export function getDockerfileTemplates() {
  */
 export function getRequiredEnvKeysForRuntime(runtimeName?: string, mode: DeployTargetMode = 'docker'): string[] {
   const plugin = runtimeRegistry.get(runtimeName)
-  if (plugin) {
-    return plugin.getRequiredTools(mode)
-  }
-  return mode === 'docker' ? ['docker'] : []
+  const strategy = getCarrierCommandStrategy(mode)
+  return strategy.getRequiredTools(plugin)
 }
 
 export { runtimeRegistry }

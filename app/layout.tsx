@@ -1,6 +1,7 @@
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import './globals.css'
+import { ThemeProvider } from '@/lib/theme/theme-context'
 
 export const metadata: Metadata = {
   title: '运维控制台 | 项目部署管理',
@@ -26,9 +27,26 @@ export const metadata: Metadata = {
 }
 
 export const viewport: Viewport = {
-  colorScheme: 'dark',
+  colorScheme: 'dark light',
   themeColor: '#101820',
 }
+
+const themeScript = `
+  (function() {
+    try {
+      var saved = localStorage.getItem('solodeck_theme');
+      var theme = saved || 'titanium';
+      document.documentElement.setAttribute('data-theme', theme);
+      if (theme === 'light') {
+        document.documentElement.classList.remove('dark');
+        document.documentElement.classList.add('light');
+      } else {
+        document.documentElement.classList.remove('light');
+        document.documentElement.classList.add('dark');
+      }
+    } catch (e) {}
+  })();
+`
 
 export default function RootLayout({
   children,
@@ -36,10 +54,15 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="zh-CN" className="dark">
+    <html lang="zh-CN" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+      </head>
       <body className="antialiased">
-        {children}
-        {process.env.NODE_ENV === 'production' && <Analytics />}
+        <ThemeProvider>
+          {children}
+          {process.env.NODE_ENV === 'production' && <Analytics />}
+        </ThemeProvider>
       </body>
     </html>
   )
