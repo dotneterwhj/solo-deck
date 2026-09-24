@@ -353,3 +353,13 @@ solodeck/
 - **双入口主题交互体验**：
   - **全局顶栏快选**：`components/theme/theme-switcher.tsx`，在导航栏右侧提供带有实时调色板预览指示器与下拉气泡菜单的快捷切换器。
   - **系统设置全景**：在 `components/settings/system-settings.tsx` 中提供直观网格卡片式的主题预览与选择面板。
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
