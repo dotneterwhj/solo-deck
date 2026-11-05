@@ -8,7 +8,7 @@ export async function POST(
 ) {
   try {
     const { projectId } = await context.params
-    const project = getProjectById(projectId)
+    const project = await getProjectById(projectId)
     if (!project) {
       return NextResponse.json({ error: '项目未找到' }, { status: 404 })
     }

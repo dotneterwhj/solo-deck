@@ -8,8 +8,8 @@ import {
 export async function GET() {
   try {
     cleanupScheduler.init()
-    const stats = getArtifactDiskStats()
-    const settings = getSettings()
+    const stats = await getArtifactDiskStats()
+    const settings = await getSettings()
 
     return NextResponse.json({
       stats,
@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
 
     cleanupScheduler.init()
     const result = await cleanupScheduler.triggerManualCleanup(type)
-    const stats = getArtifactDiskStats()
+    const stats = await getArtifactDiskStats()
 
     return NextResponse.json({
       ok: true,

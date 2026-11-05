@@ -12,7 +12,7 @@ export async function POST(
 ) {
   try {
     const { id } = await context.params
-    const server = getServerById(id)
+    const server = await getServerById(id)
     if (!server) {
       return NextResponse.json({ error: '服务器未找到' }, { status: 404 })
     }
@@ -175,7 +175,7 @@ export async function POST(
     results.forEach((r) => {
       envSnapshot[r.key] = { installed: r.installed, version: r.version }
     })
-    updateServer(id, { installedEnvs: envSnapshot })
+    await updateServer(id, { installedEnvs: envSnapshot })
 
     return NextResponse.json({
       serverId: id,

@@ -83,13 +83,13 @@ class PipelineManager {
     }
   }
 
-  public cancel(deploymentId: string): boolean {
+  public async cancel(deploymentId: string): Promise<boolean> {
     const controller = this.activeControllers.get(deploymentId)
     if (controller) {
       controller.abort()
       this.activeControllers.delete(deploymentId)
 
-      const dep = getDeploymentById(deploymentId)
+      const dep = await getDeploymentById(deploymentId)
       if (dep && dep.status === 'running') {
         const cancelLog: DeployLogEntry = {
           id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -97,21 +97,21 @@ class PipelineManager {
           type: 'error',
           timestamp: new Date().toLocaleTimeString(),
         }
-        appendDeployLog(deploymentId, cancelLog)
+        await appendDeployLog(deploymentId, cancelLog)
         this.emit(deploymentId, { type: 'log', deploymentId, payload: cancelLog })
 
         const durationSeconds = dep.startTime
           ? Math.round((Date.now() - new Date(dep.startTime).getTime()) / 1000)
           : undefined
 
-        updateDeployment(deploymentId, {
+        await updateDeployment(deploymentId, {
           status: 'cancelled',
           endTime: new Date().toISOString(),
           durationSeconds,
           currentStep: '已取消',
         })
 
-        createNotification({
+        await createNotification({
           type: 'deployment',
           level: 'warning',
           title: `项目【${dep.projectName}】部署任务已取消`,
@@ -145,7 +145,7 @@ class PipelineManager {
     triggerType: TriggerType = 'manual',
     customCommit?: { hash?: string; message?: string; versionTag?: string }
   ): Promise<Deployment> {
-    const project = getProjectById(projectId)
+    const project = await getProjectById(projectId)
     if (!project) {
       throw new Error(`Project ${projectId} not found`)
     }
@@ -163,7 +163,7 @@ class PipelineManager {
             ? `rollback: 回滚到版本 ${commitHash}`
             : `webhook: 自动触发分支 ${project.branch}`))
 
-    const deployment = createDeployment({
+    const deployment = await createDeployment({
       projectId: project.id,
       projectName: project.name,
       branch: project.branch,
@@ -242,17 +242,17 @@ class PipelineManager {
       const durationSeconds = Math.round((Date.now() - startTime) / 1000)
       log(`[!] 流水线异常终止: ${err.message || '未知异常'}`, 'error')
 
-      updateDeployment(deploymentId, {
+      await updateDeployment(deploymentId, {
         status: 'failed',
         endTime: new Date().toISOString(),
         durationSeconds,
         currentStep: '部署异常',
       })
-      updateProject(project.id, {
+      await updateProject(project.id, {
         status: 'error',
       })
 
-      createNotification({
+      await createNotification({
         type: 'deployment',
         level: 'error',
         title: `项目【${project.name}】部署失败`,
@@ -293,7 +293,7 @@ class PipelineManager {
   ): Promise<void> {
     const deploymentId = deployment.id
     setStatus('running', '初始化环境')
-    updateProject(project.id, { status: 'deploying' })
+    await updateProject(project.id, { status: 'deploying' })
 
     const workspaceDir = path.join(process.cwd(), '.cicd_workspaces', project.id)
     if (!fs.existsSync(workspaceDir)) {
@@ -311,10 +311,10 @@ class PipelineManager {
     // 查找目标服务器节点及其 SSH 凭据
     let server: ServerNode | undefined
     if (project.serverId) {
-      server = getServerById(project.serverId)
+      server = await getServerById(project.serverId)
     }
     if (!server) {
-      server = getServerByIp(project.serverIp)
+      server = await getServerByIp(project.serverIp)
     }
 
     if (abortController.signal.aborted) return
@@ -386,11 +386,11 @@ class PipelineManager {
     if (gitInfo.hash) {
       deployment.commitHash = gitInfo.hash
       deployment.commitMessage = gitInfo.message
-      updateDeployment(deploymentId, {
+      await updateDeployment(deploymentId, {
         commitHash: gitInfo.hash,
         commitMessage: gitInfo.message,
       })
-      updateProject(project.id, {
+      await updateProject(project.id, {
         lastCommitHash: gitInfo.hash,
         lastCommitMessage: gitInfo.message,
       })
@@ -417,7 +417,7 @@ class PipelineManager {
     // 获取当前载体驱动 (IPipelineCarrier: Docker / Native / Docker Compose)
     // -------------------------------------------------------------
     const carrier = getCarrier(project.deployTargetMode)
-    const settings = getSettings()
+    const settings = await getSettings()
 
     const carrierCtx: CarrierContext = {
       project,
@@ -521,13 +521,13 @@ class PipelineManager {
     log(`[00:15] ✓ 【真实系统流水线】执行顺利完成！总耗时: ${durationSeconds} 秒`, 'success', 'COMPLETE')
 
     const nowIso = new Date().toISOString()
-    updateDeployment(deploymentId, {
+    await updateDeployment(deploymentId, {
       status: 'success',
       endTime: nowIso,
       durationSeconds,
       currentStep: '部署完成',
     })
-    updateProject(project.id, {
+    await updateProject(project.id, {
       status: 'active',
       lastDeployed: nowIso,
       lastCommitHash: deployment.commitHash,
@@ -535,7 +535,7 @@ class PipelineManager {
       lastVersionTag: deployment.versionTag,
     })
 
-    createNotification({
+    await createNotification({
       type: 'deployment',
       level: 'success',
       title: `项目【${project.name}】部署成功`,
@@ -656,7 +656,7 @@ class PipelineManager {
   ): Promise<void> {
     const deploymentId = deployment.id
     setStatus('running', '初始化环境')
-    updateProject(project.id, { status: 'deploying' })
+    await updateProject(project.id, { status: 'deploying' })
 
     log(`[00:00] 启动【沙箱模拟模式】部署流水线...`, 'info', 'INIT')
     log(`[00:00] 部署ID: ${deploymentId} | 目标服务器: ${project.serverName} (${project.serverIp})`, 'info', 'INIT')
@@ -669,13 +669,13 @@ class PipelineManager {
     log(`[00:01] 正在连接 Git 远程仓库拉取分支 [${project.branch}]...`, 'info', 'GIT_CLONE')
     await this.sleep(1200, abortController.signal)
     log(`[00:02] ✓ 成功检出最新提交 [${deployment.commitHash}]: ${deployment.commitMessage}`, 'success', 'GIT_CLONE')
-    updateProject(project.id, {
+    await updateProject(project.id, {
       lastCommitHash: deployment.commitHash,
       lastCommitMessage: deployment.commitMessage,
     })
 
     const carrier = getCarrier(project.deployTargetMode)
-    const settings = getSettings()
+    const settings = await getSettings()
 
     const simCtx: CarrierSimulateContext = {
       project,
@@ -728,13 +728,13 @@ class PipelineManager {
     log(`[00:14] ✓ 流水线执行成功！总耗时: ${durationSeconds} 秒`, 'success', 'COMPLETE')
 
     const nowIso = new Date().toISOString()
-    updateDeployment(deploymentId, {
+    await updateDeployment(deploymentId, {
       status: 'success',
       endTime: nowIso,
       durationSeconds,
       currentStep: '部署完成',
     })
-    updateProject(project.id, {
+    await updateProject(project.id, {
       status: 'active',
       lastDeployed: nowIso,
       lastCommitHash: deployment.commitHash,
@@ -742,7 +742,7 @@ class PipelineManager {
       lastVersionTag: deployment.versionTag,
     })
 
-    createNotification({
+    await createNotification({
       type: 'deployment',
       level: 'success',
       title: `项目【${project.name}】部署成功 (模拟)`,

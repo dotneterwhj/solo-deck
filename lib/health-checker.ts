@@ -1,9 +1,9 @@
 import { Project, HealthCheckResult } from './types'
-import { readDb, updateProject, createNotification } from './db'
+import { getProjects, updateProject, createNotification, getSettings } from './db'
 
-function notifyStatusChange(project: Project, newResult: HealthCheckResult) {
+async function notifyStatusChange(project: Project, newResult: HealthCheckResult) {
   if (newResult.status === 'unhealthy' && project.healthStatus === 'healthy') {
-    createNotification({
+    await createNotification({
       type: 'health_check',
       level: 'error',
       title: `心跳探针告警: 【${project.name}】健康异常`,
@@ -16,7 +16,7 @@ function notifyStatusChange(project: Project, newResult: HealthCheckResult) {
       },
     })
   } else if (newResult.status === 'healthy' && project.healthStatus === 'unhealthy') {
-    createNotification({
+    await createNotification({
       type: 'health_check',
       level: 'success',
       title: `心跳探针恢复: 【${project.name}】恢复健康`,
@@ -46,7 +46,7 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
       checkedAt: project.lastHealthCheck?.checkedAt || nowIso,
     }
     if (project.healthStatus !== 'unconfigured' || !project.lastHealthCheck) {
-      updateProject(project.id, {
+      await updateProject(project.id, {
         healthStatus: 'unconfigured',
         lastHealthCheck: result,
       })
@@ -65,8 +65,8 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
         url: rawUrl,
         checkedAt: nowIso,
       }
-      notifyStatusChange(project, result)
-      updateProject(project.id, {
+      await notifyStatusChange(project, result)
+      await updateProject(project.id, {
         healthStatus: 'unhealthy',
         lastHealthCheck: result,
       })
@@ -82,8 +82,8 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
         url: rawUrl,
         checkedAt: nowIso,
       }
-      notifyStatusChange(project, result)
-      updateProject(project.id, {
+      await notifyStatusChange(project, result)
+      await updateProject(project.id, {
         healthStatus: 'unhealthy',
         lastHealthCheck: result,
       })
@@ -99,8 +99,8 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
       url: rawUrl,
       checkedAt: nowIso,
     }
-    notifyStatusChange(project, result)
-    updateProject(project.id, {
+    await notifyStatusChange(project, result)
+    await updateProject(project.id, {
       healthStatus: 'healthy',
       lastHealthCheck: result,
     })
@@ -133,8 +133,8 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
         url: rawUrl,
         checkedAt: nowIso,
       }
-      notifyStatusChange(project, result)
-      updateProject(project.id, {
+      await notifyStatusChange(project, result)
+      await updateProject(project.id, {
         healthStatus: 'healthy',
         lastHealthCheck: result,
       })
@@ -148,8 +148,8 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
         url: rawUrl,
         checkedAt: nowIso,
       }
-      notifyStatusChange(project, result)
-      updateProject(project.id, {
+      await notifyStatusChange(project, result)
+      await updateProject(project.id, {
         healthStatus: 'unhealthy',
         lastHealthCheck: result,
       })
@@ -170,8 +170,8 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
       url: rawUrl,
       checkedAt: nowIso,
     }
-    notifyStatusChange(project, result)
-    updateProject(project.id, {
+    await notifyStatusChange(project, result)
+    await updateProject(project.id, {
       healthStatus: 'unhealthy',
       lastHealthCheck: result,
     })
@@ -183,12 +183,12 @@ export async function checkProjectHealth(project: Project): Promise<HealthCheckR
  * 批量执行所有项目的健康检查探针
  */
 export async function checkAllProjectsHealth(): Promise<Record<string, HealthCheckResult>> {
-  const db = readDb()
+  const projects = await getProjects()
   const results: Record<string, HealthCheckResult> = {}
 
   // 并发检查所有项目
   await Promise.all(
-    db.projects.map(async (proj) => {
+    projects.map(async (proj) => {
       try {
         const res = await checkProjectHealth(proj)
         results[proj.id] = res
@@ -225,12 +225,11 @@ export class HealthCheckScheduler {
     }
   }
 
-  public init() {
+  public async init() {
     if (this.initialized) return
     this.initialized = true
     try {
-      const { getSettings } = require('./db')
-      const settings = getSettings()
+      const settings = await getSettings()
       this.enabled = settings.enablePeriodicHealthCheck ?? true
       this.intervalSeconds = Math.max(5, settings.healthCheckIntervalSeconds || 30)
     } catch {

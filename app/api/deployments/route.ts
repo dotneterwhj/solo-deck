@@ -6,7 +6,7 @@ export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url)
     const projectId = searchParams.get('projectId') || undefined
-    const deployments = getDeployments(projectId)
+    const deployments = await getDeployments(projectId)
     return NextResponse.json(deployments)
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 })

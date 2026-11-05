@@ -11,7 +11,7 @@ export async function POST(
 ) {
   try {
     const { id } = await context.params
-    const server = getServerById(id)
+    const server = await getServerById(id)
     if (!server) {
       return NextResponse.json({ error: '服务器未找到' }, { status: 404 })
     }
@@ -169,7 +169,7 @@ export async function POST(
       // 更新数据库该主机的依赖状态
       const envs = { ...(server.installedEnvs || {}) }
       envs[envKey] = { installed: true, version: detectedVersion }
-      updateServer(id, { installedEnvs: envs })
+      await updateServer(id, { installedEnvs: envs })
     } else {
       log(`[!] ${preset.name} 一键安装未能成功完成，建议切换查看手动安装命令`)
     }

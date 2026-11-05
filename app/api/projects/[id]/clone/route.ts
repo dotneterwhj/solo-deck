@@ -8,7 +8,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params
-    const sourceProject = getProjectById(id)
+    const sourceProject = await getProjectById(id)
 
     if (!sourceProject) {
       return NextResponse.json({ error: '指定的源项目不存在，无法克隆' }, { status: 404 })
@@ -51,7 +51,7 @@ export async function POST(
       }
     }
 
-    const cloned = createProject({
+    const cloned = await createProject({
       name: targetName,
       description:
         body.description !== undefined
@@ -88,7 +88,7 @@ export async function POST(
       lastDeployed: '未部署',
     })
 
-    createNotification({
+    await createNotification({
       type: 'project',
       level: 'info',
       title: `项目流水线克隆成功: 【${cloned.name}】`,

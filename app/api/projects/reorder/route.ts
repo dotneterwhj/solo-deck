@@ -8,7 +8,7 @@ export async function PUT(req: NextRequest) {
 
     // 如果包含跨主机迁移或者目标主机更新
     if (moveProject && moveProject.projectId) {
-      updateProject(moveProject.projectId, {
+      await updateProject(moveProject.projectId, {
         serverId: moveProject.serverId,
         serverName: moveProject.serverName,
         serverIp: moveProject.serverIp,
@@ -16,9 +16,9 @@ export async function PUT(req: NextRequest) {
       })
     }
 
-    let updatedProjects = getProjects()
+    let updatedProjects = await getProjects()
     if (Array.isArray(projectIds) && projectIds.length > 0) {
-      updatedProjects = reorderProjects(projectIds)
+      updatedProjects = await reorderProjects(projectIds)
     }
 
     return NextResponse.json({ success: true, projects: updatedProjects })

@@ -10,7 +10,7 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: 'serverIds 必须为非空数组' }, { status: 400 })
     }
 
-    const updatedServers = reorderServers(serverIds).map(maskServerCredentials)
+    const updatedServers = (await reorderServers(serverIds)).map(maskServerCredentials)
     return NextResponse.json({ success: true, servers: updatedServers })
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 })

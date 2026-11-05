@@ -7,7 +7,7 @@ export async function GET(
 ) {
   try {
     const { id } = await context.params
-    const deployment = getDeploymentById(id)
+    const deployment = await getDeploymentById(id)
     if (!deployment) {
       return NextResponse.json({ error: '部署记录未找到' }, { status: 404 })
     }

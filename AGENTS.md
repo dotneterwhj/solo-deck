@@ -69,8 +69,11 @@
      - **项目克隆**：流水线复制完成即时反馈。
    - 提供未读小红点与数字徽标、分类标签筛选（全部/未读/部署/心跳/主机/清理）、单条标记已读与全域联动跳转、一键全部已读、单条删除与一键清空。
    - 持久化层实现最大 200 条滚动容量保护，自动淘汰超期历史通知，杜绝数据膨胀。
-10. **零外部依赖原子持久化存储与智能路径解析**：
-   - 基于 `data/db.json` 的原子持久化存储引擎，内置初始种子数据。
+10. **现代化 Prisma 7.10.1 + SQLite 本地持久化存储与智能路径解析**：
+   - 彻底告别原单一 JSON 文件并发读写瓶颈，全面升级为 **Prisma ORM 7.10.1** 驱动本地 **SQLite** 数据库（`data/solodeck.db`）。
+   - 采用 `@prisma/adapter-better-sqlite3`（支持 Node 24 原生绑定），在 Next.js 服务端维护全局单例连接。
+   - 数据访问层（`lib/db.ts`）全面拥抱原生 `async/await`，对前端提供完全向后兼容的业务实体模型。
+   - 内置**自动数据迁移机制**：首次启动时若检测到历史 `data/db.json`，自动执行平滑数据导入与表初始化；若为全新环境则自动装载初始种子演示数据。
    - 路径解析统一使用 `resolvePath`（基于 `os.homedir()` 展开 `~` 用户主目录并转为绝对路径），避免 Node.js `fs.existsSync` 因不支持波浪号扩展导致误判。
 11. **按目标主机归类与生产环境醒目标记 (Host-Grouped Project Management & Production Badging)**：
    - 彻底优化项目列表页面视觉层次，移除头部冗余杂乱的下拉筛选器（运行环境、目标主机、分类标签、心跳状态等多重下拉），收拢为“全局快速搜索 + 紧凑状态切换分段器 + 一键探测/巡检监控”的轻量化顶栏。
@@ -89,7 +92,7 @@
      - **极光秘境 (Aurora Emerald)**：暗夜冷萃翡翠绿，深翠暗林与北欧极光微光。
      - **赛博深霓 (Cyberpunk Purple)**：霓虹冷紫与暗夜黑，前卫赛博朋克与高饱和品红。
      - **纯净白昼 (Pure Light)**：清爽通透的高对比白昼模式。
-   - **防闪烁与本地记忆**：在 `app/layout.tsx` 中嵌入同步内联脚本，在 DOM 渲染首帧前瞬时恢复 `localStorage` 中的 `data-theme` 属性与 `dark`/`light` 类名，杜绝页面刷新闪烁 (FOUC)。
+   - **防闪烁与本地记忆**：在 `app/layout.tsx` 中嵌入同步内联脚本，在 DOM渲染首帧前瞬时恢复 `localStorage` 中的 `data-theme` 属性与 `dark`/`light` 类名，杜绝页面刷新闪烁 (FOUC)。
    - **全域便捷交互**：在顶部导航栏右上角提供交互式调色板气泡 (`components/theme/theme-switcher.tsx`)，并在【全局系统设置】中提供全景主题展示与切换卡片。
 14. **多平台 Git 鉴权自适应与安全脱敏 (`lib/git-utils.ts`)**：
    - **深入抹平 Git 托管平台 HTTP Basic Auth 差异**：
@@ -104,6 +107,7 @@
 ## 🛠️ 技术栈与依赖
 
 - **框架**：Next.js 16 (App Router + Turbopack)
+- **数据库 & ORM**：Prisma 7.10.1、SQLite (`@prisma/adapter-better-sqlite3` + `better-sqlite3`)
 - **UI & 渲染**：React 19、Tailwind CSS v4、shadcn/ui 设计体系、Lucide React 图标
 - **语言**：TypeScript 5.7 (严格模式)
 - **系统与通信**：`ssh2` (SSH/SFTP 客户端)、Node.js `child_process`、Server-Sent Events (SSE)
@@ -118,6 +122,8 @@
 | `npm run dev` / `pnpm dev` | 启动本地 Next.js 开发服务器 (`http://localhost:3000`) |
 | `npm run build` / `pnpm build` | 执行 Turbopack 生产编译构建 |
 | `npm run start` / `pnpm start` | 启动编译后的生产服务器 |
+| `pnpm run db:push` | 将 `prisma/schema.prisma` 模型同步至 SQLite 本地库 (`data/solodeck.db`) |
+| `pnpm run db:generate` | 重新生成 Prisma Client 类型定义文件 (`lib/prisma-client`) |
 | `npx tsc --noEmit` | 纯 TypeScript 类型检查（建议提交修改前必须通过） |
 
 ---
@@ -192,10 +198,15 @@ solodeck/
 
 ## 🧩 核心开发规范与设计约定
 
-### 1. 数据持久化规范 (`lib/db.ts`)
-- 所有对数据的读取与修改**必须**通过 `lib/db.ts` 暴露的方法执行，**严禁直接使用 `fs.writeFileSync` 裸写 `data/db.json`**。
-- `lib/db.ts` 内部实现了内存缓存 (`cachedDb`) 与临时文件重命名 (`tempFile -> renameSync`) 的原子写入机制，可防止高并发写入下的文件损坏。
-- 新增实体字段时，需同时更新 `lib/types.ts` 和 `lib/db.ts` 中的默认初始化值，保证数据结构的向后兼容性。
+### 1. 数据持久化规范 (`lib/db.ts` & `prisma/schema.prisma`)
+- 所有对数据库实体的读取与修改**必须**通过 `lib/db.ts` 暴露的异步方法执行，或通过 `lib/prisma.ts` 的单例 Client 操作。**严禁直接使用 `fs.writeFileSync` 裸写 JSON 文件**。
+- 存储层采用 **Prisma 7.10.1** 配合 `@prisma/adapter-better-sqlite3`（SQLite 驱动），数据库文件持久化于 `data/solodeck.db`。
+- `lib/db.ts` 内置了从旧版 `data/db.json` 自动导入与平滑迁移机制，首次检测到旧数据时自动迁移至 SQLite，并提供默认种子数据初始化保护。
+- 新增/变更实体模型或数据字段时：
+  1. 在 `prisma/schema.prisma` 中定义模型字段。
+  2. 运行 `pnpm run db:push` 将变更同步至本地 SQLite 数据库。
+  3. 运行 `pnpm run db:generate` 更新 TypeScript Prisma Client（输出至 `lib/prisma-client`）。
+  4. 同步更新 `lib/types.ts` 和 `lib/db.ts` 中的 Row 转换器与默认字段，保证向后兼容性。
 
 ### 2. 多语言运行时可插拔扩展规范 (`lib/runtimes/`)
 - **原则**：禁止在 UI 组件（如 `new-project-wizard.tsx`、`project-list.tsx` 等）中硬编码运行时选项数组。所有运行时列表必须通过 `getAllRuntimes()` 动态获取。

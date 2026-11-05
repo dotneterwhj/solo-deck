@@ -8,7 +8,7 @@ export async function POST(
 ) {
   try {
     const { id } = await context.params
-    const server = getServerById(id)
+    const server = await getServerById(id)
     if (!server) {
       return NextResponse.json({ error: '服务器未找到' }, { status: 404 })
     }
@@ -88,14 +88,14 @@ export async function POST(
       }
     }
     const nowIso = new Date().toISOString()
-    const updated = updateServer(id, {
+    const updated = await updateServer(id, {
       status: isOnline ? 'online' : 'offline',
       lastChecked: nowIso,
       latencyMs: latency,
     })
 
     if (!isOnline && server.status === 'online') {
-      createNotification({
+      await createNotification({
         type: 'server',
         level: 'error',
         title: `主机失联告警: 【${server.name}】`,
@@ -107,7 +107,7 @@ export async function POST(
         },
       })
     } else if (isOnline && server.status === 'offline') {
-      createNotification({
+      await createNotification({
         type: 'server',
         level: 'success',
         title: `主机恢复在线: 【${server.name}】`,

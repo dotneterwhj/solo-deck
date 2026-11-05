@@ -1,0 +1,121 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/prisma-client"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Project {
+  id                 String   @id
+  name               String
+  description        String?
+  repository         String
+  branch             String
+  gitUsername        String?
+  gitToken           String?
+  runtime            String
+  deployTargetMode   String?  @default("docker")
+  artifactType       String?  @default("auto")
+  dockerDeliveryMode String?  @default("auto")
+  dockerBuildArgs    String?
+  dockerRegistry     String?
+  status             String   @default("stopped")
+  serverId           String?
+  serverIp           String   @default("127.0.0.1")
+  serverName         String   @default("默认服务器")
+  serverTags         String?
+  serverPort         String   @default("[3000]")
+  containerPort      String?
+  portMappings       String?
+  deployPath         String   @default("/opt/app")
+  installCommand     String   @default("npm install")
+  buildCommand       String   @default("npm run build")
+  startCommand       String   @default("npm start")
+  healthCheckUrl     String?
+  healthStatus       String?  @default("unconfigured")
+  lastHealthCheck    String?
+  envVars            String?
+  runnerMode         String   @default("simulation")
+  lastDeployed       String?
+  lastCommitHash     String?
+  lastCommitMessage  String?
+  lastVersionTag     String?
+  sortOrder          Int      @default(0)
+  createdAt          String
+  updatedAt          String
+}
+
+model Deployment {
+  id              String  @id
+  projectId       String
+  projectName     String
+  branch          String
+  commitHash      String?
+  commitMessage   String?
+  versionTag      String?
+  triggerType     String  @default("manual")
+  status          String  @default("pending")
+  currentStep     String?
+  startTime       String
+  endTime         String?
+  durationSeconds Int?
+  logs            String  @default("[]")
+  createdAt       String?
+}
+
+model ServerNode {
+  id            String  @id
+  name          String
+  ip            String
+  port          Int     @default(22)
+  user          String  @default("root")
+  authType      String  @default("password")
+  password      String?
+  privateKey    String?
+  passphrase    String?
+  status        String  @default("offline")
+  lastChecked   String?
+  latencyMs     Int?
+  tags          String?
+  description   String?
+  installedEnvs String?
+  sortOrder     Int     @default(0)
+}
+
+model SystemSettings {
+  id                         String   @id @default("default")
+  platformName               String   @default("Solo Deck 平台")
+  workspacePath              String
+  artifactPath               String
+  concurrencyLimit           Int      @default(5)
+  webhookNotificationUrl     String?
+  webhookType                String?  @default("dingtalk")
+  notifyOnSuccess            Boolean  @default(true)
+  notifyOnFailure            Boolean  @default(true)
+  dockerRegistry             String?
+  enablePeriodicHealthCheck  Boolean? @default(true)
+  healthCheckIntervalSeconds Int?     @default(30)
+  enableArtifactCleanup      Boolean? @default(true)
+  artifactRetentionDays      Int?     @default(7)
+  artifactMaxKeepPerProject  Int?     @default(5)
+  artifactCleanupIntervalHours Int?   @default(24)
+  enableDockerImagePrune     Boolean? @default(true)
+  dockerPruneDanglingOnly    Boolean? @default(true)
+  dockerPruneRetentionHours  Int?     @default(72)
+  dockerPruneIntervalHours   Int?     @default(24)
+  lastArtifactCleanupAt      String?
+  lastDockerPruneAt          String?
+}
+
+model SystemNotification {
+  id        String   @id
+  type      String
+  level     String
+  title     String
+  message   String
+  read      Boolean  @default(false)
+  createdAt String
+  metadata  String?
+}

@@ -5,7 +5,7 @@ import { getProjects } from '@/lib/db'
 export async function POST() {
   try {
     const results = await checkAllProjectsHealth()
-    const projects = getProjects()
+    const projects = await getProjects()
     return NextResponse.json({
       success: true,
       results,
@@ -25,7 +25,7 @@ export async function GET(req: NextRequest) {
     if (shouldProbe) {
       results = await checkAllProjectsHealth()
     }
-    const projects = getProjects()
+    const projects = await getProjects()
     return NextResponse.json({
       success: true,
       results,

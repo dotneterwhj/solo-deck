@@ -9,7 +9,7 @@ export async function GET(
   context: { params: Promise<{ id: string }> }
 ) {
   const { id } = await context.params
-  const deployment = getDeploymentById(id)
+  const deployment = await getDeploymentById(id)
 
   if (!deployment) {
     return new Response('Deployment not found', { status: 404 })

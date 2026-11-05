@@ -7,7 +7,7 @@ export async function PATCH(
 ) {
   try {
     const { id } = await context.params
-    const success = markNotificationAsRead(id)
+    const success = await markNotificationAsRead(id)
     if (!success) {
       return NextResponse.json({ error: '未找到指定通知或标记失败' }, { status: 404 })
     }
@@ -23,7 +23,7 @@ export async function DELETE(
 ) {
   try {
     const { id } = await context.params
-    const success = deleteNotification(id)
+    const success = await deleteNotification(id)
     if (!success) {
       return NextResponse.json({ error: '未找到指定通知或删除失败' }, { status: 404 })
     }

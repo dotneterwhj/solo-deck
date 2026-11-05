@@ -8,7 +8,7 @@ export async function GET(
 ) {
   try {
     const { id } = await context.params
-    const project = getProjectById(id)
+    const project = await getProjectById(id)
     if (!project) {
       return NextResponse.json({ error: '项目不存在' }, { status: 404 })
     }
@@ -36,7 +36,7 @@ export async function PUT(
       }
     }
 
-    const updated = updateProject(id, body)
+    const updated = await updateProject(id, body)
     if (!updated) {
       return NextResponse.json({ error: '项目未找到' }, { status: 404 })
     }
@@ -52,7 +52,7 @@ export async function DELETE(
 ) {
   try {
     const { id } = await context.params
-    const ok = deleteProject(id)
+    const ok = await deleteProject(id)
     if (!ok) {
       return NextResponse.json({ error: '项目未找到或删除失败' }, { status: 404 })
     }

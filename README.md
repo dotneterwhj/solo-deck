@@ -172,10 +172,11 @@
   - 顶部导航栏右上角集成调色板微缩胶囊切换器 (`<ThemeSwitcher />`)，一键唤出下拉调色板。
   - 【全局系统设置】中提供全景网格卡片面板，直观查看各主题的配色预览与设计理念。
 
-### 19. 零外部依赖原子持久化存储
-- 基于轻量级 JSON 存储引擎（位于 `data/db.json`），内置内存缓存与临时文件重命名 (`tempFile -> renameSync`) 原子写入保障，杜绝文件损坏。
+### 19. 现代化 Prisma 7.10.1 + SQLite 本地持久化存储
+- 全面升级采用 **Prisma 7.10.1** 驱动本地 **SQLite** 数据库（`data/solodeck.db`），配合 `@prisma/adapter-better-sqlite3`（支持 Node 24 原生绑定），彻底解决传统单 JSON 文件的并发冲突与性能瓶颈。
+- **全异步数据流**：数据层接口全面拥抱原生 `async/await`，为服务端 API 与流水线生命周期提供强类型类型安全与事务隔离保障。
+- **自动迁移与种子初始化**：首次启动时若检测到既有 `data/db.json`，自动执行平滑数据导入与数据迁移；若为全新环境则自动装载初始种子演示数据。
 - 内置智能路径展开解析器（支持用户输入 `~` 目录及相对路径的动态展开，杜绝原生 Node.js `fs.existsSync` 对波浪号路径判断失效的问题）。
-- 内置初始项目与主机演示数据，克隆后启动即可直接查看与操作。
 
 ### 20. 多托管平台 Git 凭据自适应与安全脱敏 (`lib/git-utils.ts`)
 - **平台差异自适应与自动缺省**：
@@ -355,7 +356,9 @@ solodeck/
 │   │   ├── plugins/                  # 内置各语言运行时插件 (nodejs, python, java, go...)
 │   │   └── index.ts                  # 统一导出与自动注册
 │   ├── types.ts                      # 全局核心 TypeScript 接口定义
-│   ├── db.ts                         # 原子持久化存储引擎 (db.json)
+│   ├── prisma.ts                     # Prisma Client 客户端单例 (@prisma/adapter-better-sqlite3)
+│   ├── prisma-client/                # 自动生成的 Prisma Client 类型代码
+│   ├── db.ts                         # Prisma 7.10.1 数据访问层与自动迁移引擎
 │   ├── pipeline-runner.ts            # 流水线全局调度引擎 (状态机、SSE推流与载体驱动派发)
 │   ├── docker-distributor.ts         # Docker 镜像打包分发策略 (save_load / registry)
 │   ├── dockerfile-templates.ts       # Dockerfile 模板代理层 (适配旧接口)
@@ -364,8 +367,12 @@ solodeck/
 │   ├── env-presets.ts                # 各语言环境变量模板预设
 │   ├── time-utils.ts                 # 时间格式化工具
 │   └── utils.ts                      # 通用工具函数 (cn)
+├── prisma/
+│   └── schema.prisma                 # Prisma 数据模型定义规范
+├── prisma.config.ts                  # Prisma 7 数据库连接与驱动配置文件
 ├── data/
-│   └── db.json                       # 平台持久化数据库文件
+│   ├── solodeck.db                   # SQLite 本地生产数据库
+│   └── db.json                       # (历史) 遗留数据文件，启动时自动无缝导入迁移
 ├── README.md                         # 本文档（产品与使用指南）
 └── AGENTS.md                         # AI 助手协作开发规范与规则
 ```
@@ -376,4 +383,4 @@ solodeck/
 
 1. **凭据脱敏**：SSH 密码、私钥、Git Token 及敏感环境变量在前端展示与接口传输中均做掩码脱敏处理。
 2. **容器沙箱化**：各项目独立容器运行，端口按需映射，防止应用间端口冲突或文件系统交叉越权。
-3. **原子持久化**：数据库写入采用临时文件置换 (`renameSync`)，确保高并发或系统意外断电时数据完整不被截断。
+3. **SQLite 本地持久化**：采用 Prisma 7.10.1 结合 SQLite 本地单文件存储与事务保护，具备优异并发性能与数据自愈迁移机制。

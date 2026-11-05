@@ -3,16 +3,23 @@
   "version": "0.0.2-alpha",
   "private": true,
   "scripts": {
-    "dev": "next dev -H 0.0.0.0 -p 3000",
+    "dev": "next dev",
     "build": "next build",
-    "start": "next start -H 0.0.0.0 -p 8000"
+    "start": "next start",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate deploy"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",
+    "@prisma/adapter-better-sqlite3": "7.10.1",
+    "@prisma/client": "7.10.1",
     "@vercel/analytics": "1.6.1",
+    "better-sqlite3": "^13.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cn": "^0.2.6",
+    "dotenv": "^18.0.9",
     "lucide-react": "^1.16.0",
     "next": "16.3.3",
     "react": "^19",
@@ -24,12 +31,19 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/ssh2": "^1.15.6",
     "postcss": "^8.5",
+    "prisma": "7.10.1",
     "tailwindcss": "^4.3.3",
     "typescript": "5.7.3"
+  },
+  "pnpm": {
+    "overrides": {
+      "better-sqlite3": "^13.0.3"
+    }
   }
 }

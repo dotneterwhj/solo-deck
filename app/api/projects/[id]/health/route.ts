@@ -8,7 +8,7 @@ export async function POST(
 ) {
   try {
     const { id } = await context.params
-    const project = getProjectById(id)
+    const project = await getProjectById(id)
     if (!project) {
       return NextResponse.json({ error: '项目未找到' }, { status: 404 })
     }
@@ -17,7 +17,7 @@ export async function POST(
     return NextResponse.json({
       success: true,
       result,
-      project: getProjectById(id),
+      project: await getProjectById(id),
     })
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 })
@@ -30,7 +30,7 @@ export async function GET(
 ) {
   try {
     const { id } = await context.params
-    const project = getProjectById(id)
+    const project = await getProjectById(id)
     if (!project) {
       return NextResponse.json({ error: '项目未找到' }, { status: 404 })
     }
@@ -39,7 +39,7 @@ export async function GET(
     return NextResponse.json({
       success: true,
       result,
-      project: getProjectById(id),
+      project: await getProjectById(id),
     })
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 })

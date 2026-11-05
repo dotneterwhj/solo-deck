@@ -13,7 +13,7 @@ export async function GET(
 ) {
   try {
     const { id } = await context.params
-    const server = getServerById(id)
+    const server = await getServerById(id)
     if (!server) {
       return NextResponse.json({ error: '服务器未找到' }, { status: 404 })
     }
@@ -30,12 +30,12 @@ export async function PUT(
   try {
     const { id } = await context.params
     const body = await req.json()
-    const updated = updateServer(id, body)
+    const updated = await updateServer(id, body)
     if (!updated) {
       return NextResponse.json({ error: '服务器未找到' }, { status: 404 })
     }
 
-    createNotification({
+    await createNotification({
       type: 'server',
       level: 'info',
       title: `主机配置已变更: 【${updated.name}】`,
@@ -59,16 +59,16 @@ export async function DELETE(
 ) {
   try {
     const { id } = await context.params
-    const existing = getServerById(id)
+    const existing = await getServerById(id)
     const serverName = existing?.name || id
     const serverIp = existing?.ip || ''
 
-    const ok = deleteServer(id)
+    const ok = await deleteServer(id)
     if (!ok) {
       return NextResponse.json({ error: '服务器未找到或删除失败' }, { status: 404 })
     }
 
-    createNotification({
+    await createNotification({
       type: 'server',
       level: 'warning',
       title: `主机节点已移除`,

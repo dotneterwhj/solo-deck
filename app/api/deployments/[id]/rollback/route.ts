@@ -8,7 +8,7 @@ export async function POST(
 ) {
   try {
     const { id } = await context.params
-    const targetDeployment = getDeploymentById(id)
+    const targetDeployment = await getDeploymentById(id)
     if (!targetDeployment) {
       return NextResponse.json({ error: '目标部署记录不存在' }, { status: 404 })
     }

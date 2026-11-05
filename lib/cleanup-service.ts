@@ -67,8 +67,8 @@ export function formatBytes(bytes: number): string {
 /**
  * 获取当前 .cicd_artifacts 产物目录的磁盘占用统计
  */
-export function getArtifactDiskStats(customPath?: string): ArtifactDiskStats {
-  const settings = getSettings()
+export async function getArtifactDiskStats(customPath?: string): Promise<ArtifactDiskStats> {
+  const settings = await getSettings()
   const artifactDir = resolvePath(customPath || settings.artifactPath)
   const result: ArtifactDiskStats = {
     totalBytes: 0,
@@ -129,12 +129,12 @@ export function getArtifactDiskStats(customPath?: string): ArtifactDiskStats {
 /**
  * 执行 .cicd_artifacts 产物包生命周期清理
  */
-export function cleanArtifacts(options?: {
+export async function cleanArtifacts(options?: {
   artifactPath?: string
   retentionDays?: number
   maxKeepPerProject?: number
-}): ArtifactCleanResult {
-  const settings = getSettings()
+}): Promise<ArtifactCleanResult> {
+  const settings = await getSettings()
   const artifactDir = resolvePath(options?.artifactPath || settings.artifactPath)
   const retentionDays = options?.retentionDays ?? settings.artifactRetentionDays ?? 7
   const maxKeep = options?.maxKeepPerProject ?? settings.artifactMaxKeepPerProject ?? 5
@@ -255,7 +255,7 @@ export async function cleanDockerImages(options?: {
   danglingOnly?: boolean
   retentionHours?: number
 }): Promise<DockerPruneResult> {
-  const settings = getSettings()
+  const settings = await getSettings()
   const danglingOnly = options?.danglingOnly ?? settings.dockerPruneDanglingOnly ?? true
   const retentionHours = options?.retentionHours ?? settings.dockerPruneRetentionHours ?? 72
 
@@ -344,7 +344,7 @@ class CleanupScheduler {
     this.isRunning = true
 
     try {
-      const settings = getSettings()
+      const settings = await getSettings()
       const now = Date.now()
 
       // 1. 产物清理判定
@@ -356,13 +356,13 @@ class CleanupScheduler {
 
         if (now - lastRun >= intervalHours * 60 * 60 * 1000) {
           console.log('[CleanupScheduler] 触发 .cicd_artifacts 周期性自动清理...')
-          const res = cleanArtifacts()
+          const res = await cleanArtifacts()
           console.log(
             `[CleanupScheduler] 产物清理完成: 删除 ${res.deletedFiles} 个文件，释放空间 ${res.reclaimedFormatted}`
           )
-          updateSettings({ lastArtifactCleanupAt: new Date().toISOString() })
+          await updateSettings({ lastArtifactCleanupAt: new Date().toISOString() })
           if (res.deletedFiles > 0) {
-            createNotification({
+            await createNotification({
               type: 'cleanup',
               level: 'info',
               title: '自动任务: 交付物归档清理完成',
@@ -386,9 +386,9 @@ class CleanupScheduler {
           console.log(
             `[CleanupScheduler] Docker 清理完成: 释放空间 ${res.reclaimedSpace}，删除镜像 ${res.deletedImagesCount} 个`
           )
-          updateSettings({ lastDockerPruneAt: new Date().toISOString() })
+          await updateSettings({ lastDockerPruneAt: new Date().toISOString() })
           if (res.deletedImagesCount > 0) {
-            createNotification({
+            await createNotification({
               type: 'cleanup',
               level: 'info',
               title: '自动任务: Docker 镜像清理完成',
@@ -414,9 +414,9 @@ class CleanupScheduler {
     }
 
     if (type === 'artifacts' || type === 'all') {
-      result.artifacts = cleanArtifacts()
-      updateSettings({ lastArtifactCleanupAt: result.cleanedAt })
-      createNotification({
+      result.artifacts = await cleanArtifacts()
+      await updateSettings({ lastArtifactCleanupAt: result.cleanedAt })
+      await createNotification({
         type: 'cleanup',
         level: result.artifacts.success ? 'info' : 'warning',
         title: '交付物归档清理完成',
@@ -429,8 +429,8 @@ class CleanupScheduler {
 
     if (type === 'docker' || type === 'all') {
       result.docker = await cleanDockerImages()
-      updateSettings({ lastDockerPruneAt: result.cleanedAt })
-      createNotification({
+      await updateSettings({ lastDockerPruneAt: result.cleanedAt })
+      await createNotification({
         type: 'cleanup',
         level: result.docker.success ? 'info' : 'warning',
         title: 'Docker 镜像清理完成',

@@ -171,8 +171,8 @@ export class DockerCarrier extends BaseCarrier {
     deployment.versionTag = versionTag
     ctx.versionTag = versionTag
 
-    updateDeployment(deploymentId, { versionTag })
-    updateProject(project.id, { lastVersionTag: versionTag })
+    await updateDeployment(deploymentId, { versionTag })
+    await updateProject(project.id, { lastVersionTag: versionTag })
 
     emit({
       type: 'status',
@@ -468,8 +468,8 @@ export class DockerCarrier extends BaseCarrier {
     deployment.versionTag = versionTag
     ctx.versionTag = versionTag
 
-    updateDeployment(deploymentId, { versionTag })
-    updateProject(project.id, { lastVersionTag: versionTag })
+    await updateDeployment(deploymentId, { versionTag })
+    await updateProject(project.id, { lastVersionTag: versionTag })
 
     emit({
       type: 'status',

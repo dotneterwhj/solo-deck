@@ -3,7 +3,7 @@ import { getServers, createServer, maskServerCredentials, createNotification } f
 
 export async function GET() {
   try {
-    const servers = getServers().map(maskServerCredentials)
+    const servers = (await getServers()).map(maskServerCredentials)
     return NextResponse.json(servers)
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 })
@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    const newServer = createServer({
+    const newServer = await createServer({
       name: body.name,
       ip: body.ip,
       port: Number(body.port) || 22,
@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
       description: body.description || '',
     })
 
-    createNotification({
+    await createNotification({
       type: 'server',
       level: 'info',
       title: `新增主机节点: 【${newServer.name}】`,

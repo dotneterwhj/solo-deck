@@ -1,5 +1,6 @@
 import fs from 'fs'
 import path from 'path'
+import { prisma } from './prisma'
 import {
   Project,
   Deployment,
@@ -10,9 +11,13 @@ import {
   SystemNotification,
   NotificationType,
   PortMapping,
+  EnvVariable,
+  DockerBuildArg,
+  DockerRegistryConfig,
+  HealthCheckResult,
 } from './types'
 
-interface DatabaseSchema {
+export interface DatabaseSchema {
   projects: Project[]
   deployments: Deployment[]
   servers: ServerNode[]
@@ -20,11 +25,10 @@ interface DatabaseSchema {
   notifications?: SystemNotification[]
 }
 
-
 const DATA_DIR = path.join(process.cwd(), 'data')
 const DB_FILE = path.join(DATA_DIR, 'db.json')
 
-const DEFAULT_SETTINGS: SystemSettings = {
+export const DEFAULT_SETTINGS: SystemSettings = {
   platformName: 'Solo Deck 平台',
   workspacePath: path.join(process.cwd(), '.cicd_workspaces'),
   artifactPath: path.join(process.cwd(), '.cicd_artifacts'),
@@ -53,7 +57,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
   dockerPruneIntervalHours: 24,
 }
 
-const SEED_SERVERS: ServerNode[] = [
+export const SEED_SERVERS: ServerNode[] = [
   {
     id: 'srv-001',
     name: '生产服务器1(虚拟)',
@@ -112,7 +116,7 @@ const SEED_SERVERS: ServerNode[] = [
   },
 ]
 
-const SEED_PROJECTS: Project[] = [
+export const SEED_PROJECTS: Project[] = [
   {
     id: 'proj-001',
     name: '(虚拟)API 服务',
@@ -244,7 +248,7 @@ const SEED_PROJECTS: Project[] = [
   },
 ]
 
-const SEED_DEPLOYMENTS: Deployment[] = [
+export const SEED_DEPLOYMENTS: Deployment[] = [
   {
     id: 'dep-1001',
     projectId: 'proj-001',
@@ -273,7 +277,7 @@ const SEED_DEPLOYMENTS: Deployment[] = [
   },
 ]
 
-const SEED_NOTIFICATIONS: SystemNotification[] = [
+export const SEED_NOTIFICATIONS: SystemNotification[] = [
   {
     id: 'notif-seed-01',
     type: 'deployment',
@@ -317,52 +321,222 @@ const SEED_NOTIFICATIONS: SystemNotification[] = [
   },
 ]
 
-function ensureDataDir(): void {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true })
-  }
-}
-
-export function readDb(): DatabaseSchema {
-  ensureDataDir()
-  if (!fs.existsSync(DB_FILE)) {
-    const initialData: DatabaseSchema = {
-      projects: SEED_PROJECTS,
-      deployments: SEED_DEPLOYMENTS,
-      servers: SEED_SERVERS,
-      settings: DEFAULT_SETTINGS,
-      notifications: SEED_NOTIFICATIONS,
-    }
-    writeDb(initialData)
-    return initialData
-  }
-
+// ---------------- JSON Parsing & Serialization Helpers ----------------
+function parseJsonSafe<T>(val: string | null | undefined, fallback: T): T {
+  if (!val) return fallback
   try {
-    const raw = fs.readFileSync(DB_FILE, 'utf-8')
-    const db = JSON.parse(raw) as DatabaseSchema
-    if (!db.notifications || !Array.isArray(db.notifications)) {
-      db.notifications = SEED_NOTIFICATIONS
-      writeDb(db)
-    }
-    return db
-  } catch (err) {
-    console.error('Error reading db.json, returning defaults', err)
-    return {
-      projects: SEED_PROJECTS,
-      deployments: SEED_DEPLOYMENTS,
-      servers: SEED_SERVERS,
-      settings: DEFAULT_SETTINGS,
-      notifications: SEED_NOTIFICATIONS,
-    }
+    return JSON.parse(val) as T
+  } catch {
+    return fallback
   }
 }
 
+function toProject(row: any): Project {
+  let serverPort = parseJsonSafe<number[]>(row.serverPort, [3000])
+  if (!Array.isArray(serverPort)) {
+    serverPort = [3000]
+  }
+  return {
+    ...row,
+    serverPort,
+    containerPort: row.containerPort ? parseJsonSafe<number[]>(row.containerPort, []) : undefined,
+    portMappings: row.portMappings ? parseJsonSafe<PortMapping[]>(row.portMappings, []) : undefined,
+    serverTags: row.serverTags ? parseJsonSafe<string[]>(row.serverTags, []) : [],
+    envVars: row.envVars ? parseJsonSafe<EnvVariable[]>(row.envVars, []) : [],
+    dockerBuildArgs: row.dockerBuildArgs ? parseJsonSafe<DockerBuildArg[]>(row.dockerBuildArgs, []) : undefined,
+    dockerRegistry: row.dockerRegistry ? parseJsonSafe<Partial<DockerRegistryConfig>>(row.dockerRegistry, {}) : undefined,
+    lastHealthCheck: row.lastHealthCheck ? parseJsonSafe<HealthCheckResult>(row.lastHealthCheck, undefined as any) : undefined,
+  }
+}
 
-export function writeDb(data: DatabaseSchema): void {
-  ensureDataDir()
-  const tempPath = `${DB_FILE}.tmp`
-  fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf-8')
-  fs.renameSync(tempPath, DB_FILE)
+function toProjectRow(data: any): any {
+  const row: any = { ...data }
+  if (data.serverPort !== undefined) row.serverPort = JSON.stringify(data.serverPort)
+  if (data.containerPort !== undefined) row.containerPort = data.containerPort ? JSON.stringify(data.containerPort) : null
+  if (data.portMappings !== undefined) row.portMappings = data.portMappings ? JSON.stringify(data.portMappings) : null
+  if (data.serverTags !== undefined) row.serverTags = data.serverTags ? JSON.stringify(data.serverTags) : null
+  if (data.envVars !== undefined) row.envVars = data.envVars ? JSON.stringify(data.envVars) : null
+  if (data.dockerBuildArgs !== undefined) row.dockerBuildArgs = data.dockerBuildArgs ? JSON.stringify(data.dockerBuildArgs) : null
+  if (data.dockerRegistry !== undefined) row.dockerRegistry = data.dockerRegistry ? JSON.stringify(data.dockerRegistry) : null
+  if (data.lastHealthCheck !== undefined) row.lastHealthCheck = data.lastHealthCheck ? JSON.stringify(data.lastHealthCheck) : null
+  return row
+}
+
+function toDeployment(row: any): Deployment {
+  return {
+    ...row,
+    logs: parseJsonSafe<DeployLogEntry[]>(row.logs, []),
+  }
+}
+
+function toDeploymentRow(data: any): any {
+  const row: any = { ...data }
+  if (data.logs !== undefined) row.logs = JSON.stringify(data.logs)
+  return row
+}
+
+function toServerNode(row: any): ServerNode {
+  return {
+    ...row,
+    tags: row.tags ? parseJsonSafe<string[]>(row.tags, []) : [],
+    installedEnvs: row.installedEnvs ? parseJsonSafe<Record<string, { installed: boolean; version?: string }>>(row.installedEnvs, undefined as any) : undefined,
+  }
+}
+
+function toServerNodeRow(data: any): any {
+  const row: any = { ...data }
+  if (data.tags !== undefined) row.tags = data.tags ? JSON.stringify(data.tags) : null
+  if (data.installedEnvs !== undefined) row.installedEnvs = data.installedEnvs ? JSON.stringify(data.installedEnvs) : null
+  return row
+}
+
+function toSettings(row: any): SystemSettings {
+  return {
+    ...row,
+    dockerRegistry: row.dockerRegistry ? parseJsonSafe<DockerRegistryConfig>(row.dockerRegistry, undefined as any) : undefined,
+  }
+}
+
+function toSettingsRow(data: any): any {
+  const row: any = { ...data }
+  if (data.dockerRegistry !== undefined) row.dockerRegistry = data.dockerRegistry ? JSON.stringify(data.dockerRegistry) : null
+  return row
+}
+
+function toNotification(row: any): SystemNotification {
+  return {
+    ...row,
+    metadata: row.metadata ? parseJsonSafe<any>(row.metadata, undefined) : undefined,
+  }
+}
+
+function toNotificationRow(data: any): any {
+  const row: any = { ...data }
+  if (data.metadata !== undefined) row.metadata = data.metadata ? JSON.stringify(data.metadata) : null
+  return row
+}
+
+// ---------------- Database Initialization & Auto-Migration ----------------
+let isInitialized = false
+let initPromise: Promise<void> | null = null
+
+export async function ensureInitialized(): Promise<void> {
+  if (isInitialized) return
+  if (initPromise) return initPromise
+
+  initPromise = (async () => {
+    try {
+      const serverCount = await prisma.serverNode.count()
+      const projectCount = await prisma.project.count()
+      const settingsCount = await prisma.systemSettings.count()
+
+      if (serverCount === 0 && projectCount === 0 && settingsCount === 0) {
+        if (fs.existsSync(DB_FILE)) {
+          try {
+            const raw = fs.readFileSync(DB_FILE, 'utf-8')
+            const legacyDb = JSON.parse(raw) as Partial<DatabaseSchema>
+            console.log('[Prisma] 检测到已有 db.json，正在自动迁移数据至 SQLite...')
+
+            if (legacyDb.settings) {
+              await prisma.systemSettings.create({
+                data: toSettingsRow({ ...DEFAULT_SETTINGS, ...legacyDb.settings, id: 'default' }),
+              })
+            } else {
+              await prisma.systemSettings.create({
+                data: toSettingsRow({ ...DEFAULT_SETTINGS, id: 'default' }),
+              })
+            }
+
+            if (Array.isArray(legacyDb.servers) && legacyDb.servers.length > 0) {
+              for (let i = 0; i < legacyDb.servers.length; i++) {
+                const s = legacyDb.servers[i]
+                await prisma.serverNode.create({
+                  data: toServerNodeRow({ ...s, sortOrder: i }),
+                })
+              }
+            }
+
+            if (Array.isArray(legacyDb.projects) && legacyDb.projects.length > 0) {
+              for (let i = 0; i < legacyDb.projects.length; i++) {
+                const p = legacyDb.projects[i]
+                await prisma.project.create({
+                  data: toProjectRow({ ...p, sortOrder: i }),
+                })
+              }
+            }
+
+            if (Array.isArray(legacyDb.deployments) && legacyDb.deployments.length > 0) {
+              for (const d of legacyDb.deployments) {
+                await prisma.deployment.create({
+                  data: toDeploymentRow(d),
+                })
+              }
+            }
+
+            if (Array.isArray(legacyDb.notifications) && legacyDb.notifications.length > 0) {
+              for (const n of legacyDb.notifications) {
+                await prisma.systemNotification.create({
+                  data: toNotificationRow(n),
+                })
+              }
+            }
+
+            const backupFile = DB_FILE + '.bak'
+            fs.renameSync(DB_FILE, backupFile)
+            console.log('[Prisma] 数据迁移完成，旧数据已备份至 ' + backupFile)
+          } catch (migrateErr) {
+            console.error('[Prisma] 从 db.json 迁移失败，回退至种子初始化:', migrateErr)
+            await seedDatabase()
+          }
+        } else {
+          await seedDatabase()
+        }
+      } else if (settingsCount === 0) {
+        await prisma.systemSettings.create({
+          data: toSettingsRow({ ...DEFAULT_SETTINGS, id: 'default' }),
+        })
+      }
+      isInitialized = true
+    } catch (err) {
+      console.error('[Prisma] 数据库初始化异常:', err)
+    } finally {
+      initPromise = null
+    }
+  })()
+
+  return initPromise
+}
+
+async function seedDatabase(): Promise<void> {
+  console.log('[Prisma] 正在初始化 SQLite 演示种子数据...')
+  await prisma.systemSettings.create({
+    data: toSettingsRow({ ...DEFAULT_SETTINGS, id: 'default' }),
+  })
+
+  for (let i = 0; i < SEED_SERVERS.length; i++) {
+    await prisma.serverNode.create({
+      data: toServerNodeRow({ ...SEED_SERVERS[i], sortOrder: i }),
+    })
+  }
+
+  for (let i = 0; i < SEED_PROJECTS.length; i++) {
+    await prisma.project.create({
+      data: toProjectRow({ ...SEED_PROJECTS[i], sortOrder: i }),
+    })
+  }
+
+  for (const d of SEED_DEPLOYMENTS) {
+    await prisma.deployment.create({
+      data: toDeploymentRow(d),
+    })
+  }
+
+  for (const n of SEED_NOTIFICATIONS) {
+    await prisma.systemNotification.create({
+      data: toNotificationRow(n),
+    })
+  }
+  console.log('[Prisma] SQLite 演示种子数据初始化完毕')
 }
 
 // ---------------- Project operations ----------------
@@ -371,7 +545,6 @@ export function enrichProjectWithLatestDeployment(
   deployments: Deployment[],
   servers: ServerNode[] = []
 ): Project {
-  // Find server to get tags if not already present on project
   const srv = servers.find(
     (s) =>
       (project.serverId && s.id === project.serverId) ||
@@ -381,7 +554,6 @@ export function enrichProjectWithLatestDeployment(
   const serverTags =
     project.serverTags && project.serverTags.length > 0 ? project.serverTags : srv?.tags || []
 
-  // Find deployments for this project (sorted newest first in db)
   const projectDeployments = deployments.filter((d) => d.projectId === project.id)
   const latest = projectDeployments[0]
   const latestSuccess = projectDeployments.find((d) => d.status === 'success')
@@ -394,7 +566,6 @@ export function enrichProjectWithLatestDeployment(
   const lastVersionTag = project.lastVersionTag || activeDep?.versionTag
 
   let lastDeployed = project.lastDeployed
-  // If lastDeployed is missing, or legacy text like '刚刚' / '2 小时前', or invalid date
   if (
     !lastDeployed ||
     lastDeployed === '刚刚' ||
@@ -410,7 +581,6 @@ export function enrichProjectWithLatestDeployment(
     }
   }
 
-  // Health check status enrichment
   let healthStatus = project.healthStatus
   let lastHealthCheck = project.lastHealthCheck
 
@@ -481,21 +651,40 @@ export function enrichProjectWithLatestDeployment(
   }
 }
 
-export function getProjects(): Project[] {
-  const db = readDb()
-  return db.projects.map((p) => enrichProjectWithLatestDeployment(p, db.deployments, db.servers))
+export async function getProjects(): Promise<Project[]> {
+  await ensureInitialized()
+  const rows = await prisma.project.findMany({
+    orderBy: { sortOrder: 'asc' },
+  })
+  const deployments = (await prisma.deployment.findMany({
+    orderBy: { startTime: 'desc' },
+  })).map(toDeployment)
+  const servers = (await prisma.serverNode.findMany({
+    orderBy: { sortOrder: 'asc' },
+  })).map(toServerNode)
+
+  return rows.map((r: any) => enrichProjectWithLatestDeployment(toProject(r), deployments, servers))
 }
 
-export function getProjectById(id: string): Project | undefined {
-  const db = readDb()
-  const p = db.projects.find((proj) => proj.id === id)
-  return p ? enrichProjectWithLatestDeployment(p, db.deployments, db.servers) : undefined
+export async function getProjectById(id: string): Promise<Project | undefined> {
+  await ensureInitialized()
+  const row = await prisma.project.findUnique({
+    where: { id },
+  })
+  if (!row) return undefined
+  const deployments = (await prisma.deployment.findMany({
+    where: { projectId: id },
+    orderBy: { startTime: 'desc' },
+  })).map(toDeployment)
+  const servers = (await prisma.serverNode.findMany()).map(toServerNode)
+  return enrichProjectWithLatestDeployment(toProject(row), deployments, servers)
 }
 
-export function createProject(data: Omit<Project, 'id' | 'createdAt' | 'updatedAt'>): Project {
-  const db = readDb()
+export async function createProject(data: Omit<Project, 'id' | 'createdAt' | 'updatedAt'>): Promise<Project> {
+  await ensureInitialized()
   const now = new Date().toISOString()
-  const srv = db.servers.find(
+  const servers = (await prisma.serverNode.findMany()).map(toServerNode)
+  const srv = servers.find(
     (s) =>
       (data.serverId && s.id === data.serverId) ||
       s.ip === data.serverIp ||
@@ -550,6 +739,7 @@ export function createProject(data: Omit<Project, 'id' | 'createdAt' | 'updatedA
         checkedAt: now,
       })
 
+  const count = await prisma.project.count()
   const newProject: Project = {
     ...data,
     serverPort,
@@ -559,25 +749,28 @@ export function createProject(data: Omit<Project, 'id' | 'createdAt' | 'updatedA
     serverTags: data.serverTags || srv?.tags || [],
     healthStatus,
     lastHealthCheck,
-    id: `proj-${Date.now().toString(36)}`,
+    id: 'proj-' + Date.now().toString(36),
     createdAt: now,
     updatedAt: now,
   }
-  db.projects.unshift(newProject)
-  writeDb(db)
+
+  const row = toProjectRow({ ...newProject, sortOrder: count })
+  await prisma.project.create({ data: row })
   return newProject
 }
 
-export function updateProject(id: string, updates: Partial<Project>): Project | null {
-  const db = readDb()
-  const index = db.projects.findIndex((p) => p.id === id)
-  if (index === -1) return null
+export async function updateProject(id: string, updates: Partial<Project>): Promise<Project | null> {
+  await ensureInitialized()
+  const existing = await prisma.project.findUnique({ where: { id } })
+  if (!existing) return null
 
-  // If healthCheckUrl is explicitly changed
-  if (updates.healthCheckUrl !== undefined) {
-    if (!updates.healthCheckUrl || !updates.healthCheckUrl.trim()) {
-      updates.healthStatus = 'unconfigured'
-      updates.lastHealthCheck = {
+  const currentProject = toProject(existing)
+  const cleanUpdates = { ...updates }
+
+  if (cleanUpdates.healthCheckUrl !== undefined) {
+    if (!cleanUpdates.healthCheckUrl || !cleanUpdates.healthCheckUrl.trim()) {
+      cleanUpdates.healthStatus = 'unconfigured'
+      cleanUpdates.lastHealthCheck = {
         status: 'unconfigured',
         message: '未配置心跳探针',
         checkedAt: new Date().toISOString(),
@@ -585,133 +778,139 @@ export function updateProject(id: string, updates: Partial<Project>): Project | 
     }
   }
 
-  // 规范化多端口与容器端口映射更新逻辑
-  if (updates.portMappings !== undefined) {
-    const rawMappings = Array.isArray(updates.portMappings) ? updates.portMappings : []
+  if (cleanUpdates.portMappings !== undefined) {
+    const rawMappings = Array.isArray(cleanUpdates.portMappings) ? cleanUpdates.portMappings : []
     const validMappings = rawMappings
       .map((m) => ({ host: Number(m.host), container: Number(m.container) }))
       .filter((m) => !isNaN(m.host) && !isNaN(m.container) && m.host > 0 && m.container > 0)
     if (validMappings.length > 0) {
-      updates.portMappings = validMappings
-      updates.serverPort = validMappings.map((m) => m.host)
-      updates.containerPort = validMappings.map((m) => m.container)
+      cleanUpdates.portMappings = validMappings
+      cleanUpdates.serverPort = validMappings.map((m) => m.host)
+      cleanUpdates.containerPort = validMappings.map((m) => m.container)
     }
-  } else if (updates.serverPort !== undefined || updates.containerPort !== undefined) {
-    if (updates.serverPort !== undefined) {
-      const rawPorts = Array.isArray(updates.serverPort)
-        ? updates.serverPort
-        : [Number(updates.serverPort)]
+  } else if (cleanUpdates.serverPort !== undefined || cleanUpdates.containerPort !== undefined) {
+    if (cleanUpdates.serverPort !== undefined) {
+      const rawPorts = Array.isArray(cleanUpdates.serverPort)
+        ? cleanUpdates.serverPort
+        : [Number(cleanUpdates.serverPort)]
       const validPorts = rawPorts.map(Number).filter((p) => !isNaN(p) && p > 0)
-      updates.serverPort = validPorts.length > 0 ? validPorts : [3000]
+      cleanUpdates.serverPort = validPorts.length > 0 ? validPorts : [3000]
     }
-    if (updates.containerPort !== undefined) {
-      const rawCPorts = Array.isArray(updates.containerPort)
-        ? updates.containerPort
-        : [Number(updates.containerPort)]
+    if (cleanUpdates.containerPort !== undefined) {
+      const rawCPorts = Array.isArray(cleanUpdates.containerPort)
+        ? cleanUpdates.containerPort
+        : [Number(cleanUpdates.containerPort)]
       const validCPorts = rawCPorts.map(Number).filter((p) => !isNaN(p) && p > 0)
-      updates.containerPort = validCPorts.length > 0 ? validCPorts : (updates.serverPort || [3000])
+      cleanUpdates.containerPort = validCPorts.length > 0 ? validCPorts : (cleanUpdates.serverPort || [3000])
     }
-    const currentHosts = updates.serverPort || db.projects[index].serverPort || [3000]
-    const currentContainers = updates.containerPort || db.projects[index].containerPort || currentHosts
-    updates.portMappings = currentHosts.map((sp, idx) => ({
+    const currentHosts = cleanUpdates.serverPort || currentProject.serverPort || [3000]
+    const currentContainers = cleanUpdates.containerPort || currentProject.containerPort || currentHosts
+    cleanUpdates.portMappings = currentHosts.map((sp, idx) => ({
       host: sp,
       container: currentContainers[idx] || sp,
     }))
   }
 
-  db.projects[index] = {
-    ...db.projects[index],
-    ...updates,
+  const updatedRowData = toProjectRow({
+    ...cleanUpdates,
     updatedAt: new Date().toISOString(),
-  }
-  writeDb(db)
-  return db.projects[index]
-}
-
-export function deleteProject(id: string): boolean {
-  const db = readDb()
-  const initialLen = db.projects.length
-  db.projects = db.projects.filter((p) => p.id !== id)
-  if (db.projects.length !== initialLen) {
-    writeDb(db)
-    return true
-  }
-  return false
-}
-
-export function reorderProjects(orderedIds: string[]): Project[] {
-  const db = readDb()
-  const map = new Map<string, Project>()
-  db.projects.forEach((p) => map.set(p.id, p))
-  const newProjects: Project[] = []
-  orderedIds.forEach((id) => {
-    const p = map.get(id)
-    if (p) {
-      newProjects.push(p)
-      map.delete(id)
-    }
   })
-  map.forEach((p) => newProjects.push(p))
-  db.projects = newProjects
-  writeDb(db)
+  delete updatedRowData.id
+
+  const updated = await prisma.project.update({
+    where: { id },
+    data: updatedRowData,
+  })
+
+  return toProject(updated)
+}
+
+export async function deleteProject(id: string): Promise<boolean> {
+  await ensureInitialized()
+  try {
+    await prisma.project.delete({ where: { id } })
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function reorderProjects(orderedIds: string[]): Promise<Project[]> {
+  await ensureInitialized()
+  for (let i = 0; i < orderedIds.length; i++) {
+    try {
+      await prisma.project.update({
+        where: { id: orderedIds[i] },
+        data: { sortOrder: i },
+      })
+    } catch {
+      // ignore
+    }
+  }
   return getProjects()
 }
 
 // ---------------- Deployment operations ----------------
-export function getDeployments(projectId?: string): Deployment[] {
-  const db = readDb()
-  if (projectId) {
-    return db.deployments.filter((d) => d.projectId === projectId)
-  }
-  return db.deployments
+export async function getDeployments(projectId?: string): Promise<Deployment[]> {
+  await ensureInitialized()
+  const rows = await prisma.deployment.findMany({
+    where: projectId ? { projectId } : undefined,
+    orderBy: { startTime: 'desc' },
+  })
+  return rows.map(toDeployment)
 }
 
-export function getDeploymentById(id: string): Deployment | undefined {
-  return readDb().deployments.find((d) => d.id === id)
+export async function getDeploymentById(id: string): Promise<Deployment | undefined> {
+  await ensureInitialized()
+  const row = await prisma.deployment.findUnique({ where: { id } })
+  return row ? toDeployment(row) : undefined
 }
 
-export function createDeployment(
+export async function createDeployment(
   data: Omit<Deployment, 'id' | 'startTime' | 'status' | 'logs'> & { logs?: DeployLogEntry[] }
-): Deployment {
-  const db = readDb()
+): Promise<Deployment> {
+  await ensureInitialized()
   const newDeployment: Deployment = {
     ...data,
-    id: `dep-${Date.now().toString(36)}`,
+    id: 'dep-' + Date.now().toString(36),
     status: 'pending',
     startTime: new Date().toISOString(),
     logs: data.logs || [],
   }
-  db.deployments.unshift(newDeployment)
-  writeDb(db)
+  await prisma.deployment.create({
+    data: toDeploymentRow(newDeployment),
+  })
   return newDeployment
 }
 
-export function updateDeployment(id: string, updates: Partial<Deployment>): Deployment | null {
-  const db = readDb()
-  const index = db.deployments.findIndex((d) => d.id === id)
-  if (index === -1) return null
-
-  db.deployments[index] = {
-    ...db.deployments[index],
-    ...updates,
+export async function updateDeployment(id: string, updates: Partial<Deployment>): Promise<Deployment | null> {
+  await ensureInitialized()
+  try {
+    const data = toDeploymentRow(updates)
+    delete data.id
+    const updated = await prisma.deployment.update({
+      where: { id },
+      data,
+    })
+    return toDeployment(updated)
+  } catch {
+    return null
   }
-  writeDb(db)
-  return db.deployments[index]
 }
 
-export function appendDeployLog(id: string, log: DeployLogEntry): void {
-  const db = readDb()
-  const deployment = db.deployments.find((d) => d.id === id)
-  if (!deployment) return
-
-  deployment.logs.push(log)
-  writeDb(db)
+export async function appendDeployLog(id: string, log: DeployLogEntry): Promise<void> {
+  await ensureInitialized()
+  const dep = await prisma.deployment.findUnique({ where: { id } })
+  if (!dep) return
+  const logs = parseJsonSafe<DeployLogEntry[]>(dep.logs, [])
+  logs.push(log)
+  await prisma.deployment.update({
+    where: { id },
+    data: { logs: JSON.stringify(logs) },
+  })
 }
 
 // ---------------- Server operations ----------------
-/**
- * 对外暴露或 API 响应时脱敏 Server 凭据信息 (密码、私钥、Passphrase)
- */
 export function maskServerCredentials<T extends ServerNode>(server: T): T {
   return {
     ...server,
@@ -723,36 +922,42 @@ export function maskServerCredentials<T extends ServerNode>(server: T): T {
   }
 }
 
-export function getServers(): ServerNode[] {
-  return readDb().servers
+export async function getServers(): Promise<ServerNode[]> {
+  await ensureInitialized()
+  const rows = await prisma.serverNode.findMany({
+    orderBy: { sortOrder: 'asc' },
+  })
+  return rows.map(toServerNode)
 }
 
-export function getServerById(id: string): ServerNode | undefined {
-  return readDb().servers.find((s) => s.id === id)
+export async function getServerById(id: string): Promise<ServerNode | undefined> {
+  await ensureInitialized()
+  const row = await prisma.serverNode.findUnique({ where: { id } })
+  return row ? toServerNode(row) : undefined
 }
 
-export function getServerByIp(ip: string): ServerNode | undefined {
-  return readDb().servers.find((s) => s.ip === ip)
+export async function getServerByIp(ip: string): Promise<ServerNode | undefined> {
+  await ensureInitialized()
+  const row = await prisma.serverNode.findFirst({ where: { ip } })
+  return row ? toServerNode(row) : undefined
 }
 
-export function createServer(data: Omit<ServerNode, 'id'>): ServerNode {
-  const db = readDb()
+export async function createServer(data: Omit<ServerNode, 'id'>): Promise<ServerNode> {
+  await ensureInitialized()
+  const count = await prisma.serverNode.count()
   const newServer: ServerNode = {
     ...data,
-    id: `srv-${Date.now().toString(36)}`,
+    id: 'srv-' + Date.now().toString(36),
   }
-  db.servers.push(newServer)
-  writeDb(db)
+  await prisma.serverNode.create({
+    data: toServerNodeRow({ ...newServer, sortOrder: count }),
+  })
   return newServer
 }
 
-export function updateServer(id: string, updates: Partial<ServerNode>): ServerNode | null {
-  const db = readDb()
-  const index = db.servers.findIndex((s) => s.id === id)
-  if (index === -1) return null
-
+export async function updateServer(id: string, updates: Partial<ServerNode>): Promise<ServerNode | null> {
+  await ensureInitialized()
   const cleanUpdates = { ...updates }
-  // 保护存储的真实凭据，避免因前端回传掩码或空值而被覆盖
   if (cleanUpdates.password === '******' || cleanUpdates.password === undefined) {
     delete cleanUpdates.password
   }
@@ -763,78 +968,95 @@ export function updateServer(id: string, updates: Partial<ServerNode>): ServerNo
     delete cleanUpdates.passphrase
   }
 
-  db.servers[index] = {
-    ...db.servers[index],
-    ...cleanUpdates,
+  const data = toServerNodeRow(cleanUpdates)
+  delete data.id
+
+  try {
+    const updated = await prisma.serverNode.update({
+      where: { id },
+      data,
+    })
+    return toServerNode(updated)
+  } catch {
+    return null
   }
-  writeDb(db)
-  return db.servers[index]
 }
 
-export function deleteServer(id: string): boolean {
-  const db = readDb()
-  const initialLen = db.servers.length
-  db.servers = db.servers.filter((s) => s.id !== id)
-  if (db.servers.length !== initialLen) {
-    writeDb(db)
+export async function deleteServer(id: string): Promise<boolean> {
+  await ensureInitialized()
+  try {
+    await prisma.serverNode.delete({ where: { id } })
     return true
+  } catch {
+    return false
   }
-  return false
 }
 
-export function reorderServers(orderedIdsOrNames: string[]): ServerNode[] {
-  const db = readDb()
+export async function reorderServers(orderedIdsOrNames: string[]): Promise<ServerNode[]> {
+  await ensureInitialized()
+  const allServers = await getServers()
   const map = new Map<string, ServerNode>()
-  db.servers.forEach((s) => {
+  allServers.forEach((s) => {
     map.set(s.id, s)
     map.set(s.name, s)
   })
-  const newServers: ServerNode[] = []
   const addedIds = new Set<string>()
-  orderedIdsOrNames.forEach((key) => {
+  let order = 0
+  for (const key of orderedIdsOrNames) {
     const s = map.get(key)
     if (s && !addedIds.has(s.id)) {
-      newServers.push(s)
+      await prisma.serverNode.update({
+        where: { id: s.id },
+        data: { sortOrder: order++ },
+      })
       addedIds.add(s.id)
     }
-  })
-  db.servers.forEach((s) => {
-    if (!addedIds.has(s.id)) {
-      newServers.push(s)
-      addedIds.add(s.id)
-    }
-  })
-  db.servers = newServers
-  writeDb(db)
+  }
   return getServers()
 }
 
 // ---------------- Settings operations ----------------
-export function getSettings(): SystemSettings {
-  return readDb().settings || DEFAULT_SETTINGS
+export async function getSettings(): Promise<SystemSettings> {
+  await ensureInitialized()
+  const row = await prisma.systemSettings.findUnique({ where: { id: 'default' } })
+  if (!row) {
+    await prisma.systemSettings.create({
+      data: toSettingsRow({ ...DEFAULT_SETTINGS, id: 'default' }),
+    })
+    return DEFAULT_SETTINGS
+  }
+  return toSettings(row)
 }
 
-export function updateSettings(updates: Partial<SystemSettings>): SystemSettings {
-  const db = readDb()
-  db.settings = {
-    ...db.settings,
-    ...updates,
-  }
-  writeDb(db)
-  return db.settings
+export async function updateSettings(updates: Partial<SystemSettings>): Promise<SystemSettings> {
+  await ensureInitialized()
+  const data = toSettingsRow(updates)
+  delete data.id
+  const updated = await prisma.systemSettings.upsert({
+    where: { id: 'default' },
+    update: data,
+    create: { ...toSettingsRow(DEFAULT_SETTINGS), ...data, id: 'default' },
+  })
+  return toSettings(updated)
 }
 
 // ---------------- Stats calculations ----------------
-export function getDashboardStats(): DashboardStats {
-  const db = readDb()
-  const totalProjects = db.projects.length
-  const activeServices = db.projects.filter((p) => p.status === 'active').length
-  const stoppedServices = db.projects.filter((p) => p.status === 'stopped').length
-  const errorServices = db.projects.filter((p) => p.status === 'error').length
+export async function getDashboardStats(): Promise<DashboardStats> {
+  await ensureInitialized()
+  const [projects, deployments, servers] = await Promise.all([
+    prisma.project.findMany(),
+    prisma.deployment.findMany(),
+    prisma.serverNode.findMany(),
+  ])
 
-  const successfulDeployments = db.deployments.filter((d) => d.status === 'success').length
-  const totalFinishedDeployments = db.deployments.filter(
-    (d) => d.status === 'success' || d.status === 'failed'
+  const totalProjects = projects.length
+  const activeServices = projects.filter((p: any) => p.status === 'active').length
+  const stoppedServices = projects.filter((p: any) => p.status === 'stopped').length
+  const errorServices = projects.filter((p: any) => p.status === 'error').length
+
+  const successfulDeployments = deployments.filter((d: any) => d.status === 'success').length
+  const totalFinishedDeployments = deployments.filter(
+    (d: any) => d.status === 'success' || d.status === 'failed'
   ).length
 
   const successRate =
@@ -842,14 +1064,13 @@ export function getDashboardStats(): DashboardStats {
       ? Math.round((successfulDeployments / totalFinishedDeployments) * 100)
       : 100
 
-  // Count deployments started in last 24h
   const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000)
-  const deploymentsToday = db.deployments.filter(
-    (d) => new Date(d.startTime) >= oneDayAgo
+  const deploymentsToday = deployments.filter(
+    (d: any) => new Date(d.startTime) >= oneDayAgo
   ).length
 
-  const totalServers = db.servers.length
-  const onlineServers = db.servers.filter((s) => s.status === 'online').length
+  const totalServers = servers.length
+  const onlineServers = servers.filter((s: any) => s.status === 'online').length
 
   return {
     totalProjects,
@@ -866,118 +1087,137 @@ export function getDashboardStats(): DashboardStats {
 // ---------------- Notification operations ----------------
 const MAX_NOTIFICATIONS_LIMIT = 200
 
-export function getNotifications(options?: {
+export async function getNotifications(options?: {
   limit?: number
   unreadOnly?: boolean
   type?: NotificationType
-}): { items: SystemNotification[]; unreadCount: number; totalCount: number } {
-  const db = readDb()
-  const all = (db.notifications || []).slice()
-
-  // 按创建时间倒序排列（最新的在最前）
-  all.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-
-  const unreadCount = all.filter((n) => !n.read).length
-  const totalCount = all.length
-
-  let filtered = all
+}): Promise<{ items: SystemNotification[]; unreadCount: number; totalCount: number }> {
+  await ensureInitialized()
+  const where: any = {}
   if (options?.unreadOnly) {
-    filtered = filtered.filter((n) => !n.read)
+    where.read = false
   }
   if (options?.type) {
-    filtered = filtered.filter((n) => n.type === options.type)
+    where.type = options.type
   }
 
-  const limit = options?.limit || 100
-  const items = filtered.slice(0, limit)
+  const [rows, unreadCount, totalCount] = await Promise.all([
+    prisma.systemNotification.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: options?.limit || 100,
+    }),
+    prisma.systemNotification.count({ where: { read: false } }),
+    prisma.systemNotification.count(),
+  ])
 
   return {
-    items,
+    items: rows.map(toNotification),
     unreadCount,
     totalCount,
   }
 }
 
-export function getUnreadNotificationCount(): number {
-  const db = readDb()
-  return (db.notifications || []).filter((n) => !n.read).length
+export async function getUnreadNotificationCount(): Promise<number> {
+  await ensureInitialized()
+  return prisma.systemNotification.count({ where: { read: false } })
 }
 
-export function createNotification(
+export async function createNotification(
   data: Omit<SystemNotification, 'id' | 'createdAt' | 'read'> & {
     read?: boolean
     createdAt?: string
   }
-): SystemNotification {
-  const db = readDb()
-  if (!db.notifications) {
-    db.notifications = []
-  }
-
+): Promise<SystemNotification> {
+  await ensureInitialized()
   const newNotif: SystemNotification = {
     ...data,
-    id: `notif-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
+    id: 'notif-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 6),
     read: data.read ?? false,
     createdAt: data.createdAt || new Date().toISOString(),
   }
 
-  // 插入到最前端
-  db.notifications.unshift(newNotif)
+  await prisma.systemNotification.create({
+    data: toNotificationRow(newNotif),
+  })
 
-  // 数量上限防护（超出自动剔除尾部较早的通知）
-  if (db.notifications.length > MAX_NOTIFICATIONS_LIMIT) {
-    db.notifications = db.notifications.slice(0, MAX_NOTIFICATIONS_LIMIT)
-  }
-
-  writeDb(db)
-  return newNotif
-}
-
-export function markNotificationAsRead(id: string): boolean {
-  const db = readDb()
-  if (!db.notifications) return false
-  const target = db.notifications.find((n) => n.id === id)
-  if (!target) return false
-
-  target.read = true
-  writeDb(db)
-  return true
-}
-
-export function markAllNotificationsAsRead(): boolean {
-  const db = readDb()
-  if (!db.notifications || db.notifications.length === 0) return true
-
-  let modified = false
-  for (const n of db.notifications) {
-    if (!n.read) {
-      n.read = true
-      modified = true
+  const count = await prisma.systemNotification.count()
+  if (count > MAX_NOTIFICATIONS_LIMIT) {
+    const oldest = await prisma.systemNotification.findMany({
+      orderBy: { createdAt: 'asc' },
+      take: count - MAX_NOTIFICATIONS_LIMIT,
+      select: { id: true },
+    })
+    if (oldest.length > 0) {
+      await prisma.systemNotification.deleteMany({
+        where: { id: { in: oldest.map((o: any) => o.id) } },
+      })
     }
   }
 
-  if (modified) {
-    writeDb(db)
-  }
-  return true
+  return newNotif
 }
 
-export function deleteNotification(id: string): boolean {
-  const db = readDb()
-  if (!db.notifications) return false
-  const initialLen = db.notifications.length
-  db.notifications = db.notifications.filter((n) => n.id !== id)
-  if (db.notifications.length !== initialLen) {
-    writeDb(db)
+export async function markNotificationAsRead(id: string): Promise<boolean> {
+  await ensureInitialized()
+  try {
+    await prisma.systemNotification.update({
+      where: { id },
+      data: { read: true },
+    })
     return true
+  } catch {
+    return false
   }
-  return false
 }
 
-export function clearAllNotifications(): boolean {
-  const db = readDb()
-  db.notifications = []
-  writeDb(db)
-  return true
+export async function markAllNotificationsAsRead(): Promise<boolean> {
+  await ensureInitialized()
+  try {
+    await prisma.systemNotification.updateMany({
+      where: { read: false },
+      data: { read: true },
+    })
+    return true
+  } catch {
+    return false
+  }
 }
 
+export async function deleteNotification(id: string): Promise<boolean> {
+  await ensureInitialized()
+  try {
+    await prisma.systemNotification.delete({ where: { id } })
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function clearAllNotifications(): Promise<boolean> {
+  await ensureInitialized()
+  try {
+    await prisma.systemNotification.deleteMany()
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function readDb(): Promise<DatabaseSchema> {
+  await ensureInitialized()
+  const [projects, deployments, servers, settings, notifications] = await Promise.all([
+    getProjects(),
+    getDeployments(),
+    getServers(),
+    getSettings(),
+    prisma.systemNotification.findMany({ orderBy: { createdAt: 'desc' } }).then((rows: any[]) => rows.map(toNotification)),
+  ])
+  return {
+    projects,
+    deployments,
+    servers,
+    settings,
+    notifications,
+  }
+}

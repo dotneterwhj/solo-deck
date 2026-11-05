@@ -7,7 +7,7 @@ export async function GET() {
   try {
     healthCheckScheduler.init()
     cleanupScheduler.init()
-    const settings = getSettings()
+    const settings = await getSettings()
     return NextResponse.json(settings)
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 })
@@ -17,7 +17,7 @@ export async function GET() {
 export async function PUT(req: NextRequest) {
   try {
     const body = await req.json()
-    const updated = updateSettings(body)
+    const updated = await updateSettings(body)
 
     // 动态同步更新定时心跳检测引擎
     healthCheckScheduler.updateConfig(

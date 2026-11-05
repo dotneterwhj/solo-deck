@@ -7,7 +7,7 @@ export async function POST(
 ) {
   try {
     const { id } = await context.params
-    const cancelled = pipelineManager.cancel(id)
+    const cancelled = await pipelineManager.cancel(id)
     return NextResponse.json({ success: cancelled })
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 })
