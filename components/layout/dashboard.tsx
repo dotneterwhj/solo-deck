@@ -72,7 +72,7 @@ export function Dashboard({
       {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Top Header */}
-        <header className="border-b border-border bg-card/60 backdrop-blur-md shrink-0">
+        <header className="relative z-30 border-b border-border bg-card/60 backdrop-blur-md shrink-0">
           <div className="flex items-center justify-between h-16 px-6">
             <div>
               <h1 className="text-xl font-bold text-foreground tracking-tight">

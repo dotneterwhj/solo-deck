@@ -31,30 +31,28 @@ export class NodeJSRuntimePlugin extends BaseRuntimePlugin {
   ]
 
   readonly dockerfileTemplate = `# ===================================================
-# Node.js (Next.js Standalone 极致轻量生产模板)
-# 适用: Next.js 13 / 14 / 15+ (需在 next.config 中开启 output: 'standalone')
-# 特性: 跳过庞大 node_modules
-# 放置路径: 代码仓库根目录 / Dockerfile (与 package.json 同级)
-# ===================================================
-
-# 阶段 1: 依赖安装层 (利用 Docker 缓存加速)
+# 阶段 1: 依赖安装层 
 FROM node:24-alpine AS deps
 RUN apk add --no-cache libc6-compat
 WORKDIR /app
 
-# 设置 NPM 镜像源加速构建 (按需配置)
-RUN npm config set registry https://registry.npmmirror.com
-
 # 优先复制依赖描述文件
 COPY package*.json pnpm-lock.yaml* yarn.lock* ./
+COPY prisma ./prisma/
+
+# 设置 NPM 镜像源加速构建 (按需配置)
+# RUN npm config set registry https://registry.npmmirror.com
 
 # 自动适配 pnpm / yarn / npm 依赖安装
-RUN \\
-  if [ -f pnpm-lock.yaml ]; then corepack enable pnpm && pnpm install --frozen-lockfile; \\
-  elif [ -f yarn.lock ]; then yarn install --frozen-lockfile; \\
-  elif [ -f package-lock.json ]; then npm ci; \\
-  else npm install; \\
+RUN \
+  if [ -f pnpm-lock.yaml ]; then corepack enable pnpm && pnpm install --frozen-lockfile; \
+  elif [ -f yarn.lock ]; then yarn install --frozen-lockfile; \
+  elif [ -f package-lock.json ]; then npm ci; \
+  else npm install; \
   fi
+
+# 生成 Prisma 客户端
+RUN npx prisma generate
 
 # 阶段 2: 应用打包编译
 FROM node:24-alpine AS builder
@@ -63,40 +61,46 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
 # 禁用 Next.js 遥测数据收集以加速构建
-ENV NEXT_TELEMETRY_DISABLED=1
-
-# 确保 public 目录存在 (若项目无 public 目录也不会中断构建)
-RUN mkdir -p /app/public
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    NODE_ENV=production
 
 # 执行构建打包
 RUN npm run build --if-present
 
-# 阶段 3: 极简生产运行镜像 (仅 ~100MB)
+# 阶段 3: 生产运行镜像
 FROM node:24-alpine AS runner
 WORKDIR /app
 
-ENV NODE_ENV=production \\
-    PORT=3000 \\
+RUN apk add --no-cache libc6-compat python3 make g++ vips-dev
+
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
     HOSTNAME="0.0.0.0"
 
-# 建立无特权的非 root 用户，增强容器安全性
-RUN addgroup --system --gid 1001 nodejs && \\
-    adduser --system --uid 1001 nextjs
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nextjs 
 
-# 复制公共静态资源
-COPY --from=builder /app/public ./public
+RUN npm install sharp
 
-# 复制 Next.js Standalone 依赖追踪最小运行产物与静态资源
-# ⚠️ 注意: 请确保在 next.config.js / next.config.mjs 中配置了 output: 'standalone'
+# 1. 仅复制 Standalone 运行时及静态资源
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+
+# 2. 仅复制构建好的原生 Prisma 客户端及相关文件
+COPY --from=builder /app/node_modules/sharp ./node_modules/sharp
+COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/@prisma/client ./node_modules/@prisma/client
+
+# 3. 创建 SQLite 挂载目录
+RUN mkdir -p /app/data && chown -R nextjs:nodejs /app/data
 
 USER nextjs
 
-# 暴露服务端口 (需与 Solo Deck 部署配置的端口保持一致)
 EXPOSE 3000
 
-# Standalone 模式使用 node server.js 启动
+# 纯 Node.js 原生启动
 CMD ["node", "server.js"]
 
 # ---------------------------------------------------------------

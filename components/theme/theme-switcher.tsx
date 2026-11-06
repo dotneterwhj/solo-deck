@@ -41,7 +41,7 @@ export function ThemeSwitcher() {
   }, [isOpen])
 
   return (
-    <div className="relative" ref={menuRef}>
+    <div className={`relative ${isOpen ? 'z-50' : ''}`} ref={menuRef}>
       {/* 顶部工具栏切换触发按钮 */}
       <button
         type="button"

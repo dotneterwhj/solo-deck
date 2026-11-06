@@ -269,7 +269,7 @@ export function NotificationPopover({
   }
 
   return (
-    <div className="relative" ref={containerRef}>
+    <div className={`relative ${isOpen ? 'z-50' : ''}`} ref={containerRef}>
       {/* Trigger Button */}
       <button
         onClick={() => {
